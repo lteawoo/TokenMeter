@@ -4,3 +4,5 @@ dist
 .env
 apps/**/dist
 packages/**/dist
+__pycache__
+*.pyc
