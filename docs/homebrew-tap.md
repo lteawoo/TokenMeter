@@ -42,7 +42,7 @@ homebrew-tokenmeter/
 ## Current Cask
 
 The current cask lives at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
-It points at the published `v0.1.1` DMG asset and includes the current SHA256.
+It points at the published `v0.1.2` DMG asset and includes the current SHA256.
 
 ## Notes For The Cask
 

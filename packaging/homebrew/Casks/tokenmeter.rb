@@ -1,6 +1,6 @@
 cask "tokenmeter" do
-  version "0.1.1"
-  sha256 "f1b04778e72a5e4ac525f668411b8f2302589e9496f2b8988f38d01ce1f07b5e"
+  version "0.1.2"
+  sha256 "64f333a1d89081d039f5b7e4318080ac147c0e2361ee2c4449a56913d377d82d"
 
   url "https://github.com/lteawoo/TokenMeter/releases/download/v#{version}/TokenMeter_#{version}_aarch64.dmg"
   name "TokenMeter"
