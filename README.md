@@ -60,7 +60,7 @@ open https://github.com/lteawoo/TokenMeter/releases/latest
 
 Current release artifact:
 
-- `TokenMeter_0.1.1_aarch64.dmg`
+- `TokenMeter_0.1.2_aarch64.dmg`
 - Apple Silicon macOS build
 
 ### Build From Source

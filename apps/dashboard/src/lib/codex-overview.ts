@@ -1,5 +1,7 @@
 import type { CodexOverview } from "@tokenmeter/core";
-import type { AppSettings, TrayPresentationMode } from "@/lib/app-settings";
+import type { AppSettings } from "@/lib/app-settings";
+
+export type DesktopWindowView = "dashboard" | "panel";
 
 type CodexOverviewDataSource = {
   kind: "web" | "desktop";
@@ -9,6 +11,12 @@ type CodexOverviewDataSource = {
 const DEFAULT_LIMIT = 12;
 const TAURI_READY_TIMEOUT_MS = 5_000;
 const TAURI_READY_POLL_MS = 25;
+const DESKTOP_WINDOW_VISIBILITY_EVENT = "desktop-window-visibility-changed";
+
+type DesktopWindowVisibilityPayload = {
+  view: DesktopWindowView;
+  visible: boolean;
+};
 
 function isDesktopRuntime() {
   const runtime = globalThis as typeof globalThis & {
@@ -106,13 +114,6 @@ export async function openDashboardSettingsView() {
   return openDashboardRoute(true);
 }
 
-export async function syncTrayWeeklyRemaining(remainingPercent: number | null) {
-  return syncTrayStatus(
-    remainingPercent == null ? null : `${remainingPercent}`,
-    "text-only",
-  );
-}
-
 async function invokeDesktop<T>(command: string, payload?: Record<string, unknown>) {
   if (!isDesktopRuntime()) {
     throw new Error("Desktop runtime is required for this command.");
@@ -162,16 +163,32 @@ export async function listenForAppSettingsUpdates(
   return unlisten;
 }
 
-export async function syncTrayStatus(
-  statusText: string | null,
-  trayPresentationMode: TrayPresentationMode,
-) {
+export async function getDesktopWindowVisibility() {
   if (!isDesktopRuntime()) {
-    return;
+    return true;
   }
 
-  await invokeDesktop("sync_tray_status", {
-    statusText,
-    trayPresentationMode,
-  });
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  return await getCurrentWindow().isVisible();
+}
+
+export async function listenForDesktopWindowVisibility(
+  view: DesktopWindowView,
+  onUpdate: (visible: boolean) => void,
+) {
+  if (!isDesktopRuntime()) {
+    return () => {};
+  }
+
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<DesktopWindowVisibilityPayload>(
+    DESKTOP_WINDOW_VISIBILITY_EVENT,
+    (event) => {
+      if (event.payload.view === view) {
+        onUpdate(event.payload.visible);
+      }
+    },
+  );
+
+  return unlisten;
 }

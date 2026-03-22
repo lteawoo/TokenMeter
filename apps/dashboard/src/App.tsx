@@ -74,17 +74,17 @@ import {
   DEFAULT_APP_SETTINGS,
   type AppSettings,
   applyThemeMode,
-  formatTrayStatus,
 } from "@/lib/app-settings";
 import {
   getCodexOverview,
   getAppSettings,
+  getDesktopWindowVisibility,
   getRuntimeKind,
   listenForAppSettingsUpdates,
+  listenForDesktopWindowVisibility,
   openDashboardView,
   openDashboardSettingsView,
   saveAppSettings,
-  syncTrayStatus,
 } from "@/lib/codex-overview";
 import {
   ALL_WORKSPACES_VALUE,
@@ -180,6 +180,16 @@ function getProviderLabel(provider: CodexOverview["provider"] | null | undefined
 }
 
 const LOGO_ICON_SRC = "/logo-icon.png";
+const DASHBOARD_REFRESH_INTERVAL_MS = 15_000;
+const PANEL_REFRESH_INTERVAL_MS = 60_000;
+
+function isDocumentVisible() {
+  if (typeof document === "undefined") {
+    return true;
+  }
+
+  return document.visibilityState === "visible";
+}
 
 function CompactStatTile({
   label,
@@ -308,6 +318,10 @@ function App() {
   const openSettingsFromQuery = shouldOpenSettingsFromQuery();
   const isDesktop = runtimeKind === "desktop";
   const isDesktopPanel = isDesktop && desktopView === "panel";
+  const desktopWindowView = isDesktopPanel ? "panel" : "dashboard";
+  const [windowVisible, setWindowVisible] = useState(() =>
+    isDesktop ? true : isDocumentVisible(),
+  );
   const overviewRef = useRef<CodexOverview | null>(null);
   const requestInFlightRef = useRef(false);
   const settingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
@@ -335,6 +349,51 @@ function App() {
     };
   }, [settings.themeMode]);
 
+  useEffect(() => {
+    if (isDesktop) {
+      let cancelled = false;
+      let detach: (() => void) | undefined;
+
+      void getDesktopWindowVisibility().then((visible) => {
+        if (!cancelled) {
+          setWindowVisible(visible);
+        }
+      });
+
+      void listenForDesktopWindowVisibility(desktopWindowView, (visible) => {
+        if (!cancelled) {
+          setWindowVisible(visible);
+        }
+      }).then((unlisten) => {
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+
+        detach = unlisten;
+      });
+
+      return () => {
+        cancelled = true;
+        detach?.();
+      };
+    }
+
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      setWindowVisible(isDocumentVisible());
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [desktopWindowView, isDesktop]);
+
   const hydrateSettings = useCallback(async () => {
     if (!isDesktop) {
       setSettingsLoaded(true);
@@ -361,7 +420,7 @@ function App() {
     }
   }, [isDesktop]);
 
-  const loadOverview = useCallback(async (settingsOverride?: AppSettings) => {
+  const loadOverview = useCallback(async () => {
     if (requestInFlightRef.current) {
       return;
     }
@@ -377,23 +436,11 @@ function App() {
 
     try {
       const payload = await getCodexOverview();
-      const activeSettings = settingsOverride ?? settingsRef.current;
       startTransition(() => {
         overviewRef.current = payload;
         setOverview(payload);
         setError(null);
       });
-
-      if (isDesktop) {
-        try {
-          await syncTrayStatus(
-            formatTrayStatus(payload.latestSession, activeSettings),
-            activeSettings.trayPresentationMode,
-          );
-        } catch (traySyncError) {
-          console.error("Failed to sync tray status.", traySyncError);
-        }
-      }
     } catch (requestError) {
       startTransition(() => {
         setError(
@@ -407,7 +454,7 @@ function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isDesktop]);
+  }, []);
 
   useEffect(() => {
     void hydrateSettings();
@@ -469,19 +516,24 @@ function App() {
   }, [isDesktopPanel, openSettingsFromQuery]);
 
   useEffect(() => {
-    if (!settingsLoaded) {
+    if (!settingsLoaded || !windowVisible) {
       return;
     }
 
     void loadOverview();
+    const refreshIntervalMs = isDesktopPanel
+      ? PANEL_REFRESH_INTERVAL_MS
+      : DASHBOARD_REFRESH_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      void loadOverview();
-    }, isDesktopPanel ? 60000 : 15000);
+      if (isDocumentVisible()) {
+        void loadOverview();
+      }
+    }, refreshIntervalMs);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isDesktopPanel, loadOverview, settingsLoaded]);
+  }, [isDesktopPanel, loadOverview, settingsLoaded, windowVisible]);
 
   const handleSaveSettings = useCallback(
     async (nextSettings: AppSettings) => {
@@ -498,7 +550,7 @@ function App() {
           setSettings(savedSettings);
         });
 
-        await loadOverview(savedSettings);
+        await loadOverview();
         setSettingsOpen(false);
       } catch (requestError) {
         setSettingsError(

@@ -7,27 +7,33 @@ import type { AppSettings } from "@/lib/app-settings";
 import App from "./App";
 
 const getCodexOverviewMock = vi.hoisted(() => vi.fn());
+const getDesktopWindowVisibilityMock = vi.hoisted(() => vi.fn());
 const getRuntimeKindMock = vi.hoisted(() => vi.fn());
 const getAppSettingsMock = vi.hoisted(() => vi.fn());
 const listenForAppSettingsUpdatesMock = vi.hoisted(() => vi.fn());
+const listenForDesktopWindowVisibilityMock = vi.hoisted(() => vi.fn());
 const openDashboardViewMock = vi.hoisted(() => vi.fn());
 const openDashboardSettingsViewMock = vi.hoisted(() => vi.fn());
 const saveAppSettingsMock = vi.hoisted(() => vi.fn());
-const syncTrayStatusMock = vi.hoisted(() => vi.fn());
 
 let settingsUpdateListener:
   | ((settings: AppSettings) => void)
   | null = null;
+let desktopWindowVisibilityListener:
+  | ((visible: boolean) => void)
+  | null = null;
+let documentVisibilityState: DocumentVisibilityState = "visible";
 
 vi.mock("@/lib/codex-overview", () => ({
   getCodexOverview: getCodexOverviewMock,
+  getDesktopWindowVisibility: getDesktopWindowVisibilityMock,
   getAppSettings: getAppSettingsMock,
   getRuntimeKind: getRuntimeKindMock,
   listenForAppSettingsUpdates: listenForAppSettingsUpdatesMock,
+  listenForDesktopWindowVisibility: listenForDesktopWindowVisibilityMock,
   openDashboardView: openDashboardViewMock,
   openDashboardSettingsView: openDashboardSettingsViewMock,
   saveAppSettings: saveAppSettingsMock,
-  syncTrayStatus: syncTrayStatusMock,
 }));
 
 vi.mock("@/components/ui/chart", () => ({
@@ -134,6 +140,15 @@ const overview: CodexOverview = {
 
 overview.latestSession = overview.sessions[0];
 
+function setDocumentVisibilityState(nextState: DocumentVisibilityState) {
+  documentVisibilityState = nextState;
+  document.dispatchEvent(new Event("visibilitychange"));
+}
+
+function emitDesktopWindowVisibility(visible: boolean) {
+  desktopWindowVisibilityListener?.(visible);
+}
+
 const desktopSettings = {
   codexRootPath: "/Users/twlee/.codex/sessions",
   themeMode: "light" as const,
@@ -145,15 +160,27 @@ describe("App workspace scope selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getCodexOverviewMock.mockResolvedValue(overview);
+    getDesktopWindowVisibilityMock.mockResolvedValue(true);
     getAppSettingsMock.mockResolvedValue(desktopSettings);
     getRuntimeKindMock.mockReturnValue("web");
     saveAppSettingsMock.mockImplementation(async (settings) => settings);
-    syncTrayStatusMock.mockResolvedValue(undefined);
     settingsUpdateListener = null;
+    desktopWindowVisibilityListener = null;
+    documentVisibilityState = "visible";
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => documentVisibilityState,
+    });
     listenForAppSettingsUpdatesMock.mockImplementation(async (listener) => {
       settingsUpdateListener = listener;
       return () => {
         settingsUpdateListener = null;
+      };
+    });
+    listenForDesktopWindowVisibilityMock.mockImplementation(async (_view, listener) => {
+      desktopWindowVisibilityListener = listener;
+      return () => {
+        desktopWindowVisibilityListener = null;
       };
     });
     openDashboardSettingsViewMock.mockResolvedValue(undefined);
@@ -198,7 +225,6 @@ describe("App workspace scope selection", () => {
     expect(
       within(ledgerTable).queryByText("/Users/twlee/projects/my-skills"),
     ).not.toBeInTheDocument();
-    expect(syncTrayStatusMock).not.toHaveBeenCalled();
   });
 
   it("uses a narrow-width listbox selector in panel mode and keeps the active scope visible", async () => {
@@ -229,7 +255,6 @@ describe("App workspace scope selection", () => {
       ).toBeInTheDocument();
     });
 
-    expect(syncTrayStatusMock).toHaveBeenCalledWith("5H 90 W 80", "text-only");
     expect(screen.getByText("projects/my-skills · 1 session")).toBeInTheDocument();
     expect(screen.getByText("900")).toBeInTheDocument();
   });
@@ -263,35 +288,6 @@ describe("App workspace scope selection", () => {
         trayPresentationMode: "text-only",
       });
     });
-
-    await waitFor(() => {
-      expect(syncTrayStatusMock).toHaveBeenLastCalledWith("5H 90", "text-only");
-    });
-  });
-
-  it("keeps the overview visible when tray sync fails on desktop", async () => {
-    getRuntimeKindMock.mockReturnValue("desktop");
-    syncTrayStatusMock.mockRejectedValue(new Error("tray unavailable"));
-
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-    render(<App />);
-
-    await waitFor(() => {
-      expect(screen.getByText("TokenMeter")).toBeInTheDocument();
-    });
-
-    await waitFor(() => {
-      expect(screen.getAllByText("8,400").length).toBeGreaterThan(0);
-    });
-
-    expect(screen.queryByText("Failed to load TokenMeter data.")).not.toBeInTheDocument();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      "Failed to sync tray status.",
-      expect.any(Error),
-    );
-
-    consoleErrorSpy.mockRestore();
   });
 
   it("routes the panel settings button to dashboard settings and the primary action to the dashboard", async () => {
@@ -331,5 +327,106 @@ describe("App workspace scope selection", () => {
     await waitFor(() => {
       expect(document.documentElement.dataset.theme).toBe("dark");
     });
+  });
+
+  it("polls the dashboard only while the document is visible", async () => {
+    vi.useFakeTimers();
+    try {
+      render(<App />);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(2);
+
+      setDocumentVisibilityState("hidden");
+      await vi.advanceTimersByTimeAsync(45_000);
+
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(2);
+
+      setDocumentVisibilityState("visible");
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(3);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("polls the desktop dashboard only while desktop visibility is true", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(getCodexOverviewMock).toHaveBeenCalledTimes(1);
+      });
+
+      await waitFor(() => {
+        expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15_000);
+      });
+
+      const intervalHandle = setIntervalSpy.mock.results.at(-1)?.value;
+
+      emitDesktopWindowVisibility(false);
+
+      await waitFor(() => {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(intervalHandle);
+      });
+
+      emitDesktopWindowVisibility(true);
+
+      await waitFor(() => {
+        expect(setIntervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 15_000);
+      });
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
+  });
+
+  it("polls the compact panel only while desktop visibility is true", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+    window.history.replaceState({}, "", "/?view=panel");
+
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(getCodexOverviewMock).toHaveBeenCalledTimes(1);
+      });
+
+      await waitFor(() => {
+        expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+      });
+
+      const intervalHandle = setIntervalSpy.mock.results.at(-1)?.value;
+
+      emitDesktopWindowVisibility(false);
+
+      await waitFor(() => {
+        expect(clearIntervalSpy).toHaveBeenCalledWith(intervalHandle);
+      });
+
+      emitDesktopWindowVisibility(true);
+
+      await waitFor(() => {
+        expect(setIntervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
+      });
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
   });
 });
