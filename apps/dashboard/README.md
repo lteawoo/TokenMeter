@@ -1,9 +1,11 @@
 # TokenMeter Dashboard
 
-The dashboard app serves two runtime targets:
+The dashboard package serves two local runtime targets:
 
-- Web development via Vite + the local Node API in `apps/server`
-- Native desktop development via Tauri, without requiring the Node API at runtime
+- Browser preview for development through Vite and the local API in `apps/server`
+- Native desktop runtime through Tauri for the shipped application
+
+The browser path is a local development surface. TokenMeter is not intended to be deployed as a hosted web service.
 
 ## Prerequisites
 
@@ -14,7 +16,7 @@ The dashboard app serves two runtime targets:
 
 ## Development Workflows
 
-### Web dashboard
+### Browser preview
 
 Run the browser workflow from the workspace root:
 
@@ -27,13 +29,21 @@ This starts:
 - Vite on `http://localhost:5173`
 - The local API on `http://localhost:3001`
 
-The browser app loads Codex overview data from:
+The browser preview loads Codex overview data from:
 
 ```text
 /api/providers/codex/overview
 ```
 
-### Desktop dashboard
+To point the browser preview at a different local Codex sessions root, start the server with:
+
+```bash
+TOKENMETER_CODEX_ROOT=/absolute/path/to/.codex/sessions pnpm dev
+```
+
+This matches the desktop app's Codex root contract, but the browser preview does not persist settings between runs.
+
+### Desktop app
 
 Run the native desktop shell from the workspace root:
 
@@ -41,7 +51,7 @@ Run the native desktop shell from the workspace root:
 pnpm dev:desktop
 ```
 
-This starts the Vite frontend for Tauri and launches a native window. In desktop mode, the dashboard reads Codex overview data through a Tauri command instead of the Node API, so `apps/server` does not need to be running.
+This starts the Vite frontend for Tauri and launches a native window. In desktop mode, the dashboard reads Codex overview data through a Tauri command instead of the Node API, so `apps/server` is only there to support the local development loop.
 The Tauri dev/build workflow injects `VITE_TOKENMETER_RUNTIME=desktop` so the shared frontend selects the desktop data path from the first render.
 
 The desktop app also creates a menu bar icon:
@@ -51,19 +61,31 @@ The desktop app also creates a menu bar icon:
 - `Refresh` asks the frontend to reload overview data
 - `Quit TokenMeter` exits the app
 
+Desktop settings are available from both the dashboard and the compact panel. They control:
+
+- Codex root path for desktop overview loading
+- Theme mode (`system`, `dark`, or `light`)
+- Menu bar metric mode (`5H`, `Weekly`, or `Both`)
+- Menu bar presentation (`Icon + text` or `Text only`)
+
 Build the desktop app with:
 
 ```bash
 pnpm build:desktop
 ```
 
-## Architecture Notes
+## Runtime Architecture
 
 - Shared UI lives in `apps/dashboard`
-- Web data path uses `fetch("/api/providers/codex/overview")`
-- Desktop data path uses `invoke("get_codex_overview")`
+- Browser preview data uses `fetch("/api/providers/codex/overview")`
+- Desktop runtime data uses `invoke("get_codex_overview")`
 - The frontend switches at runtime through `src/lib/codex-overview.ts`
 - Desktop-side overview shaping lives in `src-tauri/src/codex.rs`
+
+## Release Position
+
+TokenMeter should be treated as a local-first Tauri desktop app.
+The browser runtime is useful for development and debugging, but the release artifact is the desktop bundle produced by `pnpm build:desktop`.
 
 ## Current Scope
 

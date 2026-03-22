@@ -2,17 +2,32 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CodexOverview, CodexSessionSummary, UsageTotals } from "@tokenmeter/core";
+import type { AppSettings } from "@/lib/app-settings";
 
 import App from "./App";
 
 const getCodexOverviewMock = vi.hoisted(() => vi.fn());
 const getRuntimeKindMock = vi.hoisted(() => vi.fn());
+const getAppSettingsMock = vi.hoisted(() => vi.fn());
+const listenForAppSettingsUpdatesMock = vi.hoisted(() => vi.fn());
 const openDashboardViewMock = vi.hoisted(() => vi.fn());
+const openDashboardSettingsViewMock = vi.hoisted(() => vi.fn());
+const saveAppSettingsMock = vi.hoisted(() => vi.fn());
+const syncTrayStatusMock = vi.hoisted(() => vi.fn());
+
+let settingsUpdateListener:
+  | ((settings: AppSettings) => void)
+  | null = null;
 
 vi.mock("@/lib/codex-overview", () => ({
   getCodexOverview: getCodexOverviewMock,
+  getAppSettings: getAppSettingsMock,
   getRuntimeKind: getRuntimeKindMock,
+  listenForAppSettingsUpdates: listenForAppSettingsUpdatesMock,
   openDashboardView: openDashboardViewMock,
+  openDashboardSettingsView: openDashboardSettingsViewMock,
+  saveAppSettings: saveAppSettingsMock,
+  syncTrayStatus: syncTrayStatusMock,
 }));
 
 vi.mock("@/components/ui/chart", () => ({
@@ -119,12 +134,31 @@ const overview: CodexOverview = {
 
 overview.latestSession = overview.sessions[0];
 
+const desktopSettings = {
+  codexRootPath: "/Users/twlee/.codex/sessions",
+  themeMode: "light" as const,
+  trayMetricMode: "both" as const,
+  trayPresentationMode: "text-only" as const,
+};
+
 describe("App workspace scope selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getCodexOverviewMock.mockResolvedValue(overview);
+    getAppSettingsMock.mockResolvedValue(desktopSettings);
     getRuntimeKindMock.mockReturnValue("web");
+    saveAppSettingsMock.mockImplementation(async (settings) => settings);
+    syncTrayStatusMock.mockResolvedValue(undefined);
+    settingsUpdateListener = null;
+    listenForAppSettingsUpdatesMock.mockImplementation(async (listener) => {
+      settingsUpdateListener = listener;
+      return () => {
+        settingsUpdateListener = null;
+      };
+    });
+    openDashboardSettingsViewMock.mockResolvedValue(undefined);
     window.history.replaceState({}, "", "/");
+    document.documentElement.dataset.theme = "dark";
   });
 
   it("filters dashboard summaries, charts, and session ledger by selected workspace", async () => {
@@ -164,6 +198,7 @@ describe("App workspace scope selection", () => {
     expect(
       within(ledgerTable).queryByText("/Users/twlee/projects/my-skills"),
     ).not.toBeInTheDocument();
+    expect(syncTrayStatusMock).not.toHaveBeenCalled();
   });
 
   it("uses a narrow-width listbox selector in panel mode and keeps the active scope visible", async () => {
@@ -194,7 +229,107 @@ describe("App workspace scope selection", () => {
       ).toBeInTheDocument();
     });
 
+    expect(syncTrayStatusMock).toHaveBeenCalledWith("5H 90 W 80", "text-only");
     expect(screen.getByText("projects/my-skills · 1 session")).toBeInTheDocument();
     expect(screen.getByText("900")).toBeInTheDocument();
+  });
+
+  it("hydrates desktop settings, applies the light theme, and saves updated tray preferences", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("light");
+    });
+
+    const [settingsButton] = await screen.findAllByRole("button", { name: "Settings" });
+    fireEvent.click(settingsButton);
+
+    fireEvent.click(screen.getByLabelText("5H"));
+
+    const codexRootInput = screen.getByLabelText("Codex root");
+    fireEvent.change(codexRootInput, {
+      target: { value: "/Users/twlee/projects/.codex/sessions" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /save settings/i }));
+
+    await waitFor(() => {
+      expect(saveAppSettingsMock).toHaveBeenCalledWith({
+        codexRootPath: "/Users/twlee/projects/.codex/sessions",
+        themeMode: "light",
+        trayMetricMode: "five-hour",
+        trayPresentationMode: "text-only",
+      });
+    });
+
+    await waitFor(() => {
+      expect(syncTrayStatusMock).toHaveBeenLastCalledWith("5H 90", "text-only");
+    });
+  });
+
+  it("keeps the overview visible when tray sync fails on desktop", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+    syncTrayStatusMock.mockRejectedValue(new Error("tray unavailable"));
+
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("TokenMeter")).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("8,400").length).toBeGreaterThan(0);
+    });
+
+    expect(screen.queryByText("Failed to load TokenMeter data.")).not.toBeInTheDocument();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "Failed to sync tray status.",
+      expect.any(Error),
+    );
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("routes the panel settings button to dashboard settings and the primary action to the dashboard", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+    window.history.replaceState({}, "", "/?view=panel");
+
+    render(<App />);
+
+    const dashboardButtons = await screen.findAllByRole("button", {
+      name: /open dashboard/i,
+    });
+    fireEvent.click(dashboardButtons[0]);
+    fireEvent.click(dashboardButtons[1]);
+
+    expect(openDashboardSettingsViewMock).toHaveBeenCalledTimes(1);
+    expect(openDashboardViewMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
+  });
+
+  it("updates the popover theme when desktop settings change in another window", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+    window.history.replaceState({}, "", "/?view=panel");
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("light");
+    });
+
+    expect(settingsUpdateListener).not.toBeNull();
+
+    settingsUpdateListener?.({
+      ...desktopSettings,
+      themeMode: "dark",
+    });
+
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("dark");
+    });
   });
 });

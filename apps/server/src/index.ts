@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import cors from "cors";
 import express from "express";
 import {
@@ -8,6 +10,9 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
+const codexRootPath = path.resolve(
+  process.env.TOKENMETER_CODEX_ROOT ?? DEFAULT_CODEX_SESSIONS_DIR,
+);
 
 app.use(cors());
 app.use(express.json());
@@ -27,13 +32,16 @@ app.get("/api/providers/codex/overview", async (req, res) => {
   );
 
   try {
-    const sessions = await listRecentCodexSessions({ limit });
+    const sessions = await listRecentCodexSessions({
+      limit,
+      rootDir: codexRootPath,
+    });
     const summary = summariseCodexSessions(sessions);
 
     res.json({
       provider: "codex",
       generatedAt: new Date().toISOString(),
-      sessionsDir: DEFAULT_CODEX_SESSIONS_DIR,
+      sessionsDir: codexRootPath,
       ...summary,
     });
   } catch (error) {

@@ -409,7 +409,7 @@ export function PanelWorkspaceSelector({
       </Button>
 
       {open ? (
-        <div className="absolute inset-x-0 top-full z-20 mt-1.5 overflow-hidden rounded-2xl border border-border/80 bg-[#0b1410]/98 shadow-2xl shadow-black/45">
+        <div className="absolute inset-x-0 top-full z-20 mt-1.5 overflow-hidden rounded-2xl border border-border/80 bg-popover/95 shadow-2xl shadow-black/20 backdrop-blur">
           <div
             aria-label="Workspace scope"
             className="max-h-64 overflow-y-auto p-1.5"

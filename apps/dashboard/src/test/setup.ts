@@ -1,4 +1,6 @@
 import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach } from "vitest";
 
 class MockResizeObserver {
   observe() {}
@@ -33,4 +35,8 @@ Object.defineProperty(window.HTMLElement.prototype, "scrollIntoView", {
   configurable: true,
   writable: true,
   value: () => {},
+});
+
+afterEach(() => {
+  cleanup();
 });

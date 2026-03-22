@@ -8,6 +8,9 @@ use std::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::Value;
+use tauri::{AppHandle, Runtime};
+
+use crate::settings;
 
 const DEFAULT_LIMIT: usize = 12;
 const MIN_LIMIT: usize = 1;
@@ -86,9 +89,14 @@ impl CodexSessionSummary {
   }
 }
 
-fn codex_sessions_dir() -> Result<PathBuf, String> {
+fn default_codex_sessions_dir() -> Result<PathBuf, String> {
   let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
   Ok(PathBuf::from(home).join(".codex").join("sessions"))
+}
+
+fn codex_sessions_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+  let settings = settings::load_app_settings(app)?;
+  Ok(PathBuf::from(settings.codex_root_path))
 }
 
 pub fn clamp_limit(limit: Option<usize>) -> usize {
@@ -227,8 +235,11 @@ fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
   Ok(summary)
 }
 
-pub fn get_codex_overview(limit: usize) -> Result<CodexOverview, String> {
-  let sessions_dir = codex_sessions_dir()?;
+pub fn get_codex_overview<R: Runtime>(
+  app: &AppHandle<R>,
+  limit: usize,
+) -> Result<CodexOverview, String> {
+  let sessions_dir = codex_sessions_dir(app).or_else(|_| default_codex_sessions_dir())?;
   let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
   if !sessions_dir.is_dir() {
