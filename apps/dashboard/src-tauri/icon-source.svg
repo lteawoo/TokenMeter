@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="96" x2="864" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1c28" />
+      <stop offset="0.55" stop-color="#07111a" />
+      <stop offset="1" stop-color="#04070d" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(332 284) rotate(47.726) scale(524.604 621.043)" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#23d89a" stop-opacity="0.24" />
+      <stop offset="0.58" stop-color="#1f8fff" stop-opacity="0.12" />
+      <stop offset="1" stop-color="#1f8fff" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="246" fill="url(#bg)" />
+  <rect width="1024" height="1024" rx="246" fill="url(#glow)" />
+  <image
+    href="../public/logo-icon.png"
+    x="196"
+    y="196"
+    width="632"
+    height="632"
+    preserveAspectRatio="xMidYMid meet"
+  />
+</svg>
