@@ -34,6 +34,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  DashboardWorkspaceSelector,
+  PanelWorkspaceSelector,
+} from "@/components/workspace-scope-selectors";
+import {
   Card,
   CardContent,
   CardDescription,
@@ -69,6 +73,12 @@ import {
   getRuntimeKind,
   openDashboardView,
 } from "@/lib/codex-overview";
+import {
+  ALL_WORKSPACES_VALUE,
+  buildWorkspaceScopeSummaries,
+  getWorkspaceLabel,
+  getWorkspaceValue,
+} from "@/lib/workspace-scope";
 
 function formatNumber(value: number | null | undefined) {
   return (value ?? 0).toLocaleString();
@@ -118,17 +128,6 @@ function formatTime(value: string | null | undefined) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
-}
-
-function sessionLabel(session: CodexSessionSummary) {
-  return (
-    session.cwd?.split("/").filter(Boolean).slice(-2).join("/") ??
-    session.fileName
-  );
-}
-
-function sessionWorkspace(session: CodexSessionSummary) {
-  return session.cwd ?? session.filePath;
 }
 
 function formatModelLabel(session: Pick<CodexSessionSummary, "model" | "effort"> | null) {
@@ -255,7 +254,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedWorkspace, setSelectedWorkspace] = useState("all");
+  const [selectedWorkspace, setSelectedWorkspace] = useState(ALL_WORKSPACES_VALUE);
   const runtimeKind = getRuntimeKind();
   const desktopView = getDesktopView();
   const isDesktop = runtimeKind === "desktop";
@@ -311,40 +310,27 @@ function App() {
   }, [isDesktopPanel, loadOverview]);
 
   const sessions = overview?.sessions ?? [];
-  const workspaceOptions = useMemo(() => {
-    const seen = new Set<string>();
-
-    return sessions
-      .map((session) => ({
-        value: sessionWorkspace(session),
-        label: sessionLabel(session),
-      }))
-      .filter((option) => {
-        if (seen.has(option.value)) {
-          return false;
-        }
-
-        seen.add(option.value);
-        return true;
-      });
-  }, [sessions]);
+  const workspaceSummaries = useMemo(
+    () => buildWorkspaceScopeSummaries(sessions),
+    [sessions],
+  );
 
   useEffect(() => {
     if (
-      selectedWorkspace !== "all" &&
-      !workspaceOptions.some((option) => option.value === selectedWorkspace)
+      selectedWorkspace !== ALL_WORKSPACES_VALUE &&
+      !workspaceSummaries.some((summary) => summary.value === selectedWorkspace)
     ) {
-      setSelectedWorkspace("all");
+      setSelectedWorkspace(ALL_WORKSPACES_VALUE);
     }
-  }, [selectedWorkspace, workspaceOptions]);
+  }, [selectedWorkspace, workspaceSummaries]);
 
   const filteredSessions = useMemo(() => {
-    if (selectedWorkspace === "all") {
+    if (selectedWorkspace === ALL_WORKSPACES_VALUE) {
       return sessions;
     }
 
     return sessions.filter(
-      (session) => sessionWorkspace(session) === selectedWorkspace,
+      (session) => getWorkspaceValue(session) === selectedWorkspace,
     );
   }, [selectedWorkspace, sessions]);
 
@@ -370,11 +356,19 @@ function App() {
       ),
     [filteredSessions],
   );
+  const selectedWorkspaceSummary =
+    selectedWorkspace === ALL_WORKSPACES_VALUE
+      ? null
+      : workspaceSummaries.find((summary) => summary.value === selectedWorkspace) ?? null;
   const selectedWorkspaceLabel =
-    selectedWorkspace === "all"
+    selectedWorkspace === ALL_WORKSPACES_VALUE
       ? "All workspaces"
-      : workspaceOptions.find((option) => option.value === selectedWorkspace)?.label ??
+      : selectedWorkspaceSummary?.label ??
         "Workspace";
+  const selectedWorkspaceScopeDetail =
+    selectedWorkspaceSummary === null
+      ? `${workspaceSummaries.length} workspace${workspaceSummaries.length === 1 ? "" : "s"}`
+      : `${selectedWorkspaceSummary.label} · ${selectedWorkspaceSummary.sessionCount} session${selectedWorkspaceSummary.sessionCount === 1 ? "" : "s"}`;
 
   const chartData = useMemo(
     () =>
@@ -382,7 +376,7 @@ function App() {
         .slice(0, 8)
         .reverse()
         .map((session) => ({
-          label: sessionLabel(session),
+          label: getWorkspaceLabel(getWorkspaceValue(session)),
           totalTokens: session.totalUsage?.totalTokens ?? 0,
           lastTurnTokens: session.lastUsage?.totalTokens ?? 0,
           lastTurnShare:
@@ -432,34 +426,13 @@ function App() {
               </Card>
             ) : null}
 
-            {workspaceOptions.length ? (
-              <div className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5">
-                <Button
-                  variant={selectedWorkspace === "all" ? "secondary" : "outline"}
-                  size="sm"
-                  className="h-7 rounded-full px-2.5 font-mono text-[11px]"
-                  onClick={() => {
-                    setSelectedWorkspace("all");
-                  }}
-                >
-                  All
-                </Button>
-                {workspaceOptions.map((option) => (
-                  <Button
-                    key={option.value}
-                    variant={
-                      selectedWorkspace === option.value ? "secondary" : "outline"
-                    }
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 font-mono text-[11px]"
-                    onClick={() => {
-                      setSelectedWorkspace(option.value);
-                    }}
-                  >
-                    {option.label}
-                  </Button>
-                ))}
-              </div>
+            {workspaceSummaries.length ? (
+              <PanelWorkspaceSelector
+                onSelect={setSelectedWorkspace}
+                selectedValue={selectedWorkspace}
+                summaries={workspaceSummaries}
+                totalSessionCount={sessions.length}
+              />
             ) : null}
 
             <div className="grid grid-cols-2 gap-2">
@@ -482,6 +455,7 @@ function App() {
             </div>
 
             <div className="grid gap-2">
+              <CompactMetric label="Scope" value={selectedWorkspaceScopeDetail} />
               <CompactMetric label="Model" value={formatModelLabel(latest)} />
             </div>
 
@@ -601,33 +575,14 @@ function App() {
                 </Button>
               </div>
             </div>
-            <div className="mt-6 flex flex-wrap gap-2">
-              <Button
-                variant={selectedWorkspace === "all" ? "secondary" : "outline"}
-                size="sm"
-                className="rounded-full font-mono"
-                onClick={() => {
-                  setSelectedWorkspace("all");
-                }}
-              >
-                All workspaces
-              </Button>
-              {workspaceOptions.map((option) => (
-                <Button
-                  key={option.value}
-                  variant={
-                    selectedWorkspace === option.value ? "secondary" : "outline"
-                  }
-                  size="sm"
-                  className="rounded-full font-mono"
-                  onClick={() => {
-                    setSelectedWorkspace(option.value);
-                  }}
-                >
-                  {option.label}
-                </Button>
-              ))}
-            </div>
+            {workspaceSummaries.length ? (
+              <DashboardWorkspaceSelector
+                onSelect={setSelectedWorkspace}
+                selectedValue={selectedWorkspace}
+                summaries={workspaceSummaries}
+                totalSessionCount={sessions.length}
+              />
+            ) : null}
           </section>
 
           {error ? (
@@ -690,7 +645,7 @@ function App() {
                 <StatCard
                   icon={<FolderCode className="size-4" />}
                   label="Latest workspace"
-                  value={latest ? sessionLabel(latest) : "-"}
+                  value={latest ? getWorkspaceLabel(getWorkspaceValue(latest)) : "-"}
                   detail="Current working directory summary for the newest session."
                 />
               </>
@@ -913,12 +868,12 @@ function App() {
                                 Workspace
                               </p>
                               <p className="truncate font-mono text-foreground">
-                                {sessionWorkspace(latest)}
+                                {getWorkspaceValue(latest)}
                               </p>
                             </div>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-sm font-mono text-xs">
-                            {sessionWorkspace(latest)}
+                            {getWorkspaceValue(latest)}
                           </TooltipContent>
                         </Tooltip>
                       </>
@@ -1059,15 +1014,15 @@ function App() {
                                 <TooltipTrigger asChild>
                                   <div>
                                     <p className="truncate font-medium text-foreground">
-                                      {sessionLabel(session)}
+                                      {getWorkspaceLabel(getWorkspaceValue(session))}
                                     </p>
                                     <p className="truncate font-mono text-xs text-muted-foreground">
-                                      {sessionWorkspace(session)}
+                                      {getWorkspaceValue(session)}
                                     </p>
                                   </div>
                                 </TooltipTrigger>
                                 <TooltipContent className="max-w-sm font-mono text-xs">
-                                  {sessionWorkspace(session)}
+                                  {getWorkspaceValue(session)}
                                 </TooltipContent>
                               </Tooltip>
                             </TableCell>
