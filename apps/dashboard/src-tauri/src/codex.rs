@@ -38,6 +38,7 @@ pub struct CodexSessionSummary {
   file_path: String,
   file_name: String,
   model: Option<String>,
+  effort: Option<String>,
   cwd: Option<String>,
   updated_at: String,
   total_usage: Option<UsageTotals>,
@@ -72,6 +73,7 @@ impl CodexSessionSummary {
       file_path: file_path.display().to_string(),
       file_name,
       model: None,
+      effort: None,
       cwd: None,
       updated_at: DateTime::<Utc>::from(std::time::UNIX_EPOCH)
         .to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -182,6 +184,7 @@ fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
       let payload = &event["payload"];
       summary.cwd = payload["cwd"].as_str().map(str::to_string).or(summary.cwd);
       summary.model = payload["model"].as_str().map(str::to_string).or(summary.model);
+      summary.effort = payload["effort"].as_str().map(str::to_string).or(summary.effort);
       summary.id = payload["turn_id"]
         .as_str()
         .map(str::to_string)

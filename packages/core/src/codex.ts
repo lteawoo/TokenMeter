@@ -47,6 +47,7 @@ type ParsedSessionEvent = {
     };
     cwd?: string;
     model?: string;
+    effort?: string;
     turn_id?: string;
   };
 };
@@ -111,6 +112,7 @@ function createEmptySessionSummary(filePath: string): CodexSessionSummary {
     filePath,
     fileName,
     model: null,
+    effort: null,
     cwd: null,
     updatedAt: new Date(0).toISOString(),
     totalUsage: null,
@@ -164,6 +166,7 @@ async function parseCodexSessionFile(
     if (event.type === "turn_context") {
       summary.cwd = event.payload?.cwd ?? summary.cwd;
       summary.model = event.payload?.model ?? summary.model;
+      summary.effort = event.payload?.effort ?? summary.effort;
       summary.id = event.payload?.turn_id ?? summary.id;
     }
 

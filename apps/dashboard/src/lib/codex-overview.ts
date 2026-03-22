@@ -89,3 +89,19 @@ export async function getCodexOverview(limit = DEFAULT_LIMIT) {
 export function getRuntimeKind() {
   return isDesktopRuntime() ? "desktop" : "web";
 }
+
+export async function openDashboardView() {
+  if (isDesktopRuntime()) {
+    const ready = await waitForDesktopBridge();
+
+    if (ready) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("show_dashboard_window");
+      return;
+    }
+  }
+
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", "dashboard");
+  window.location.href = url.toString();
+}

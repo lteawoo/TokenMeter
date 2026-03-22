@@ -19,6 +19,7 @@ export type CodexSessionSummary = {
   filePath: string;
   fileName: string;
   model: string | null;
+  effort: string | null;
   cwd: string | null;
   updatedAt: string;
   totalUsage: UsageTotals | null;

@@ -14,8 +14,8 @@ const TRAY_ID: &str = "tokenmeter-tray";
 const MENU_OPEN_DASHBOARD: &str = "open-dashboard";
 const MENU_REFRESH_DASHBOARD: &str = "refresh-dashboard";
 const MENU_QUIT_APP: &str = "quit-app";
-const PANEL_WIDTH: f64 = 380.0;
-const PANEL_HEIGHT: f64 = 360.0;
+const PANEL_WIDTH: f64 = 352.0;
+const PANEL_HEIGHT: f64 = 304.0;
 const PANEL_OFFSET_Y: f64 = 10.0;
 
 fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
@@ -46,7 +46,7 @@ fn configure_main_window<R: Runtime>(app: &AppHandle<R>) {
   }
 }
 
-fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) {
   if let Some(window) = dashboard_window(app) {
     let _ = window.unminimize();
     let _ = window.show();
@@ -195,7 +195,10 @@ pub fn run() {
 
       Ok(())
     })
-    .invoke_handler(tauri::generate_handler![commands::get_codex_overview])
+    .invoke_handler(tauri::generate_handler![
+      commands::get_codex_overview,
+      commands::show_dashboard_window
+    ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }

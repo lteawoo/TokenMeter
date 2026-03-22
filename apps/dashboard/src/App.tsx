@@ -11,6 +11,7 @@ import type { CodexOverview, CodexSessionSummary } from "@tokenmeter/core";
 import {
   Activity,
   ArrowDownToLine,
+  ArrowRight,
   ArrowUpFromLine,
   Bot,
   Clock3,
@@ -58,6 +59,7 @@ import {
 import {
   getCodexOverview,
   getRuntimeKind,
+  openDashboardView,
 } from "@/lib/codex-overview";
 
 function formatNumber(value: number | null | undefined) {
@@ -70,6 +72,10 @@ function formatPercent(value: number | null | undefined) {
 
 function formatRemainingPercent(value: number | null | undefined) {
   return `${Math.max(0, 100 - Math.round(value ?? 0))}%`;
+}
+
+function getRemainingPercent(value: number | null | undefined) {
+  return Math.max(0, 100 - Math.round(value ?? 0));
 }
 
 function formatTime(value: string | null | undefined) {
@@ -96,12 +102,51 @@ function sessionWorkspace(session: CodexSessionSummary) {
   return session.cwd ?? session.filePath;
 }
 
+function formatModelLabel(session: Pick<CodexSessionSummary, "model" | "effort"> | null) {
+  if (!session?.model) {
+    return "-";
+  }
+
+  if (!session.effort) {
+    return session.model;
+  }
+
+  return `${session.model} · ${session.effort}`;
+}
+
 function getDesktopView() {
   if (typeof window === "undefined") {
     return "dashboard";
   }
 
   return new URLSearchParams(window.location.search).get("view") ?? "dashboard";
+}
+
+function getProviderLabel(provider: CodexOverview["provider"] | null | undefined) {
+  if (!provider) {
+    return "Codex";
+  }
+
+  return provider.charAt(0).toUpperCase() + provider.slice(1);
+}
+
+function CompactStatTile({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-border/70 bg-secondary/30 px-3 py-3">
+      <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+        {label}
+      </p>
+      <p className="mt-2 font-mono text-lg font-semibold text-foreground">
+        {value}
+      </p>
+    </div>
+  );
 }
 
 type StatCardProps = {
@@ -139,11 +184,11 @@ type CompactMetricProps = {
 
 function CompactMetric({ label, value }: CompactMetricProps) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/70 bg-secondary/35 px-4 py-3">
-      <span className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-secondary/20 px-3 py-2.5">
+      <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
         {label}
       </span>
-      <span className="text-right font-mono text-sm font-semibold text-foreground">
+      <span className="max-w-[11rem] truncate text-right font-mono text-xs font-semibold text-foreground">
         {value}
       </span>
     </div>
@@ -211,6 +256,11 @@ function App() {
 
   const sessions = overview?.sessions ?? [];
   const latest = overview?.latestSession ?? null;
+  const providerLabel = getProviderLabel(overview?.provider);
+  const primaryRemaining = getRemainingPercent(latest?.primaryRateLimit?.usedPercent);
+  const secondaryRemaining = getRemainingPercent(
+    latest?.secondaryRateLimit?.usedPercent,
+  );
 
   const chartData = useMemo(
     () =>
@@ -239,19 +289,14 @@ function App() {
   if (isDesktopPanel) {
     return (
       <TooltipProvider delayDuration={120}>
-        <main className="min-h-screen bg-transparent p-2">
-          <div className="mx-auto flex min-h-[calc(100vh-1rem)] w-full max-w-md flex-col gap-3 rounded-[24px] border border-border/80 bg-[#0b1410]/96 p-4 shadow-2xl shadow-black/40 backdrop-blur">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-3">
-                <h1 className="font-mono text-xl font-semibold tracking-tight text-foreground">
-                  TokenMeter
-                </h1>
-                <Badge className="bg-accent text-accent-foreground hover:bg-accent">
-                  Codex
-                </Badge>
-              </div>
-              <p className="text-xs leading-5 text-muted-foreground">
-                Menu bar status snapshot for your latest local usage window.
+        <main className="min-h-screen bg-transparent p-1.5">
+          <div className="mx-auto flex min-h-[calc(100vh-0.75rem)] w-full max-w-md flex-col gap-2.5 rounded-[22px] border border-border/80 bg-[#0b1410]/96 p-3 shadow-2xl shadow-black/40 backdrop-blur">
+            <div className="flex items-center justify-between gap-3">
+              <Badge className="h-7 rounded-full bg-accent px-2.5 text-[11px] text-accent-foreground hover:bg-accent">
+                {providerLabel}
+              </Badge>
+              <p className="font-mono text-[11px] text-muted-foreground">
+                {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
               </p>
             </div>
 
@@ -263,51 +308,52 @@ function App() {
               </Card>
             ) : null}
 
-            <div className="grid gap-2">
-              <CompactMetric
-                label="5h plan limit"
-                value={formatRemainingPercent(latest?.primaryRateLimit?.usedPercent)}
+            <div className="grid grid-cols-2 gap-2">
+              <CompactStatTile
+                label="5h left"
+                value={`${primaryRemaining}%`}
               />
-              <CompactMetric
-                label="Weekly plan limit"
-                value={formatRemainingPercent(latest?.secondaryRateLimit?.usedPercent)}
+              <CompactStatTile
+                label="Week left"
+                value={`${secondaryRemaining}%`}
               />
-              <CompactMetric
-                label="Total input"
+              <CompactStatTile
+                label="Input"
                 value={formatNumber(overview?.totals.inputTokens)}
               />
-              <CompactMetric
-                label="Total output"
+              <CompactStatTile
+                label="Output"
                 value={formatNumber(overview?.totals.outputTokens)}
-              />
-              <CompactMetric label="Latest model" value={latest?.model ?? "-"} />
-              <CompactMetric
-                label="Latest workspace"
-                value={latest ? sessionLabel(latest) : "-"}
               />
             </div>
 
-            <div className="mt-auto flex items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/40 px-4 py-3">
-              <div className="space-y-1">
-                <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                  Updated
-                </p>
-                <p className="font-mono text-sm text-foreground">
-                  {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
-                </p>
-              </div>
+            <div className="grid gap-2">
+              <CompactMetric label="Model" value={formatModelLabel(latest)} />
+              <CompactMetric label="Workspace" value={latest ? sessionLabel(latest) : "-"} />
+            </div>
+
+            <div className="mt-auto flex items-center gap-2">
               <Button
                 variant="outline"
-                className="h-10 border-border/80 bg-background/55 font-mono"
+                size="icon"
+                className="h-9 w-9 shrink-0 rounded-xl border-border/80 bg-background/55"
                 onClick={() => {
                   void loadOverview();
                 }}
                 disabled={refreshing}
               >
-                Refresh
                 <RefreshCw
-                  className={`ml-2 size-4 ${refreshing ? "animate-spin" : ""}`}
+                  className={`size-4 ${refreshing ? "animate-spin" : ""}`}
                 />
+              </Button>
+              <Button
+                className="h-9 flex-1 justify-between rounded-xl bg-accent px-3 font-mono text-accent-foreground hover:bg-accent/90"
+                onClick={() => {
+                  void openDashboardView();
+                }}
+              >
+                Open Dashboard
+                <ArrowRight className="size-4" />
               </Button>
             </div>
           </div>
@@ -452,7 +498,7 @@ function App() {
                 <StatCard
                   icon={<Bot className="size-4" />}
                   label="Latest model"
-                  value={latest?.model ?? "-"}
+                  value={formatModelLabel(latest)}
                   detail="Most recently active model detected from the session logs."
                 />
                 <StatCard
