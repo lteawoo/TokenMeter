@@ -15,7 +15,7 @@ const MENU_OPEN_DASHBOARD: &str = "open-dashboard";
 const MENU_REFRESH_DASHBOARD: &str = "refresh-dashboard";
 const MENU_QUIT_APP: &str = "quit-app";
 const PANEL_WIDTH: f64 = 352.0;
-const PANEL_HEIGHT: f64 = 304.0;
+const PANEL_HEIGHT: f64 = 332.0;
 const PANEL_OFFSET_Y: f64 = 10.0;
 
 fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {

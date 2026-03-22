@@ -393,6 +393,36 @@ function App() {
               </Card>
             ) : null}
 
+            {workspaceOptions.length ? (
+              <div className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5">
+                <Button
+                  variant={selectedWorkspace === "all" ? "secondary" : "outline"}
+                  size="sm"
+                  className="h-7 rounded-full px-2.5 font-mono text-[11px]"
+                  onClick={() => {
+                    setSelectedWorkspace("all");
+                  }}
+                >
+                  All
+                </Button>
+                {workspaceOptions.map((option) => (
+                  <Button
+                    key={option.value}
+                    variant={
+                      selectedWorkspace === option.value ? "secondary" : "outline"
+                    }
+                    size="sm"
+                    className="h-7 rounded-full px-2.5 font-mono text-[11px]"
+                    onClick={() => {
+                      setSelectedWorkspace(option.value);
+                    }}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
+              </div>
+            ) : null}
+
             <div className="grid grid-cols-2 gap-2">
               <CompactStatTile
                 label="5h left"
@@ -404,17 +434,16 @@ function App() {
               />
               <CompactStatTile
                 label="Input"
-                value={formatNumber(overview?.totals.inputTokens)}
+                value={formatNumber(filteredTotals.inputTokens)}
               />
               <CompactStatTile
                 label="Output"
-                value={formatNumber(overview?.totals.outputTokens)}
+                value={formatNumber(filteredTotals.outputTokens)}
               />
             </div>
 
             <div className="grid gap-2">
               <CompactMetric label="Model" value={formatModelLabel(latest)} />
-              <CompactMetric label="Workspace" value={latest ? sessionLabel(latest) : "-"} />
             </div>
 
             <div className="mt-auto flex items-center gap-2">
