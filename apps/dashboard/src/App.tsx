@@ -195,11 +195,38 @@ function CompactMetric({ label, value }: CompactMetricProps) {
   );
 }
 
+const ZERO_USAGE_TOTALS: CodexOverview["totals"] = {
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0,
+  totalTokens: 0,
+};
+
+function addUsageTotals(
+  left: CodexOverview["totals"],
+  right: CodexSessionSummary["totalUsage"] | CodexSessionSummary["lastUsage"],
+) {
+  if (!right) {
+    return left;
+  }
+
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    cachedInputTokens: left.cachedInputTokens + right.cachedInputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    reasoningOutputTokens:
+      left.reasoningOutputTokens + right.reasoningOutputTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
+}
+
 function App() {
   const [overview, setOverview] = useState<CodexOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedWorkspace, setSelectedWorkspace] = useState("all");
   const runtimeKind = getRuntimeKind();
   const desktopView = getDesktopView();
   const isDesktop = runtimeKind === "desktop";
@@ -255,16 +282,74 @@ function App() {
   }, [isDesktopPanel, loadOverview]);
 
   const sessions = overview?.sessions ?? [];
-  const latest = overview?.latestSession ?? null;
+  const workspaceOptions = useMemo(() => {
+    const seen = new Set<string>();
+
+    return sessions
+      .map((session) => ({
+        value: sessionWorkspace(session),
+        label: sessionLabel(session),
+      }))
+      .filter((option) => {
+        if (seen.has(option.value)) {
+          return false;
+        }
+
+        seen.add(option.value);
+        return true;
+      });
+  }, [sessions]);
+
+  useEffect(() => {
+    if (
+      selectedWorkspace !== "all" &&
+      !workspaceOptions.some((option) => option.value === selectedWorkspace)
+    ) {
+      setSelectedWorkspace("all");
+    }
+  }, [selectedWorkspace, workspaceOptions]);
+
+  const filteredSessions = useMemo(() => {
+    if (selectedWorkspace === "all") {
+      return sessions;
+    }
+
+    return sessions.filter(
+      (session) => sessionWorkspace(session) === selectedWorkspace,
+    );
+  }, [selectedWorkspace, sessions]);
+
+  const latest = filteredSessions[0] ?? null;
   const providerLabel = getProviderLabel(overview?.provider);
   const primaryRemaining = getRemainingPercent(latest?.primaryRateLimit?.usedPercent);
   const secondaryRemaining = getRemainingPercent(
     latest?.secondaryRateLimit?.usedPercent,
   );
+  const filteredTotals = useMemo(
+    () =>
+      filteredSessions.reduce(
+        (acc, session) => addUsageTotals(acc, session.totalUsage),
+        ZERO_USAGE_TOTALS,
+      ),
+    [filteredSessions],
+  );
+  const filteredLastTurnTotals = useMemo(
+    () =>
+      filteredSessions.reduce(
+        (acc, session) => addUsageTotals(acc, session.lastUsage),
+        ZERO_USAGE_TOTALS,
+      ),
+    [filteredSessions],
+  );
+  const selectedWorkspaceLabel =
+    selectedWorkspace === "all"
+      ? "All workspaces"
+      : workspaceOptions.find((option) => option.value === selectedWorkspace)?.label ??
+        "Workspace";
 
   const chartData = useMemo(
     () =>
-      sessions
+      filteredSessions
         .slice(0, 8)
         .reverse()
         .map((session) => ({
@@ -272,7 +357,7 @@ function App() {
           totalTokens: session.totalUsage?.totalTokens ?? 0,
           lastTurnTokens: session.lastUsage?.totalTokens ?? 0,
         })),
-    [sessions],
+    [filteredSessions],
   );
 
   const chartConfig = {
@@ -387,7 +472,13 @@ function App() {
                     variant="secondary"
                     className="bg-secondary/80 text-secondary-foreground"
                   >
-                    Sessions: {formatNumber(sessions.length)}
+                    Sessions: {formatNumber(filteredSessions.length)}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className="border-border/80 bg-background/60"
+                  >
+                    Scope: {selectedWorkspaceLabel}
                   </Badge>
                 </div>
               </div>
@@ -442,6 +533,33 @@ function App() {
                 </Button>
               </div>
             </div>
+            <div className="mt-6 flex flex-wrap gap-2">
+              <Button
+                variant={selectedWorkspace === "all" ? "secondary" : "outline"}
+                size="sm"
+                className="rounded-full font-mono"
+                onClick={() => {
+                  setSelectedWorkspace("all");
+                }}
+              >
+                All workspaces
+              </Button>
+              {workspaceOptions.map((option) => (
+                <Button
+                  key={option.value}
+                  variant={
+                    selectedWorkspace === option.value ? "secondary" : "outline"
+                  }
+                  size="sm"
+                  className="rounded-full font-mono"
+                  onClick={() => {
+                    setSelectedWorkspace(option.value);
+                  }}
+                >
+                  {option.label}
+                </Button>
+              ))}
+            </div>
           </section>
 
           {error ? (
@@ -474,25 +592,25 @@ function App() {
                 <StatCard
                   icon={<Gauge className="size-4" />}
                   label="Total tokens"
-                  value={formatNumber(overview?.totals.totalTokens)}
+                  value={formatNumber(filteredTotals.totalTokens)}
                   detail="Accumulated token volume across the tracked recent sessions."
                 />
                 <StatCard
                   icon={<Sparkles className="size-4" />}
                   label="Last turn tokens"
-                  value={formatNumber(overview?.lastTurnTotals.totalTokens)}
+                  value={formatNumber(filteredLastTurnTotals.totalTokens)}
                   detail="Latest burst of token usage, useful for spotting context blowups."
                 />
                 <StatCard
                   icon={<ArrowDownToLine className="size-4" />}
                   label="Total input"
-                  value={formatNumber(overview?.totals.inputTokens)}
+                  value={formatNumber(filteredTotals.inputTokens)}
                   detail="Summed input tokens across the tracked recent sessions."
                 />
                 <StatCard
                   icon={<ArrowUpFromLine className="size-4" />}
                   label="Total output"
-                  value={formatNumber(overview?.totals.outputTokens)}
+                  value={formatNumber(filteredTotals.outputTokens)}
                   detail="Summed output tokens across the tracked recent sessions."
                 />
                 <StatCard
@@ -512,7 +630,7 @@ function App() {
           </section>
 
           <Tabs defaultValue="overview" className="space-y-4">
-            <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden rounded-2xl border border-border/70 bg-card/70 p-1">
+            <TabsList className="w-full justify-start overflow-x-auto overflow-y-hidden rounded-2xl bg-card/55">
               <TabsTrigger value="overview" className="font-mono">
                 Overview
               </TabsTrigger>
@@ -643,7 +761,7 @@ function App() {
                               Model
                             </p>
                             <p className="mt-2 font-mono text-lg font-semibold">
-                              {latest.model ?? "-"}
+                              {formatModelLabel(latest)}
                             </p>
                           </div>
                           <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
@@ -751,12 +869,12 @@ function App() {
                   </CardHeader>
                   <CardContent className="grid gap-3">
                     {[
-                      ["Input", overview?.totals.inputTokens],
-                      ["Cached input", overview?.totals.cachedInputTokens],
-                      ["Output", overview?.totals.outputTokens],
+                      ["Input", filteredTotals.inputTokens],
+                      ["Cached input", filteredTotals.cachedInputTokens],
+                      ["Output", filteredTotals.outputTokens],
                       [
                         "Reasoning output",
-                        overview?.totals.reasoningOutputTokens,
+                        filteredTotals.reasoningOutputTokens,
                       ],
                     ].map(([label, value]) => (
                       <div
@@ -808,8 +926,8 @@ function App() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {sessions.length ? (
-                        sessions.map((session) => (
+                      {filteredSessions.length ? (
+                        filteredSessions.map((session) => (
                           <TableRow key={session.id}>
                             <TableCell className="max-w-[18rem]">
                               <Tooltip>
@@ -829,7 +947,7 @@ function App() {
                               </Tooltip>
                             </TableCell>
                             <TableCell className="font-mono">
-                              {session.model ?? "-"}
+                              {formatModelLabel(session)}
                             </TableCell>
                             <TableCell>
                               <Badge
@@ -859,7 +977,7 @@ function App() {
                             className="h-24 text-center text-muted-foreground"
                             colSpan={6}
                           >
-                            No sessions found.
+                            No sessions found for the selected workspace.
                           </TableCell>
                         </TableRow>
                       )}
