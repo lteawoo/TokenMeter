@@ -1,5 +1,6 @@
 use crate::codex;
 use crate::settings::{self, AppSettings};
+use crate::updates;
 use tauri::{AppHandle, Emitter, Runtime};
 
 #[tauri::command]
@@ -33,4 +34,24 @@ pub fn save_app_settings<R: Runtime>(
     app.emit("app-settings-updated", &saved)
         .map_err(|error| error.to_string())?;
     Ok(saved)
+}
+
+#[tauri::command]
+pub fn get_app_update_state<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<updates::AppUpdateState, String> {
+    updates::get_update_state(&app)
+}
+
+#[tauri::command]
+pub async fn check_for_app_updates<R: Runtime>(
+    app: AppHandle<R>,
+    force: Option<bool>,
+) -> Result<updates::AppUpdateState, String> {
+    updates::check_for_updates(&app, force.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    crate::open_external_url(&url)
 }

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { type ReactNode, useEffect } from "react";
 
 import type { AppSettings, ThemeMode, TrayMetricMode } from "@/lib/app-settings";
 
@@ -15,6 +15,7 @@ type SettingsSheetProps = {
   onChange: (settings: AppSettings) => void;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
+  supplementaryContent?: ReactNode;
 };
 
 const THEME_OPTIONS: Array<{ label: string; value: ThemeMode }> = [
@@ -76,6 +77,7 @@ export function SettingsSheet({
   onChange,
   onClose,
   onSave,
+  supplementaryContent,
 }: SettingsSheetProps) {
   useEffect(() => {
     if (!open) {
@@ -147,13 +149,13 @@ export function SettingsSheet({
                     codexRootPath: event.target.value,
                   })
                 }
-                placeholder="~/.codex/sessions"
+                placeholder="~/.codex"
                 value={settings.codexRootPath}
               />
               <p className="text-xs text-muted-foreground">
                 {runtimeKind === "desktop"
-                  ? "Desktop mode validates and persists this path before using it."
-                  : "Browser preview does not persist this path. Use TOKENMETER_CODEX_ROOT in the local server environment instead."}
+                  ? "Desktop mode validates this root and reads Codex session logs from the sessions subdirectory."
+                  : "Browser preview does not persist this path. Use TOKENMETER_CODEX_ROOT as the Codex root in the local server environment instead."}
               </p>
             </div>
 
@@ -186,6 +188,8 @@ export function SettingsSheet({
                 {error}
               </div>
             ) : null}
+
+            {supplementaryContent}
           </div>
 
           <div className="flex items-center justify-end gap-2 border-t border-border/70 pt-3">

@@ -1,14 +1,22 @@
 import path from "node:path"
+import fs from "node:fs"
 
 import react from '@vitejs/plugin-react'
 import tailwindcss from "@tailwindcss/vite"
 import { defineConfig } from 'vitest/config'
 
 const host = process.env.TAURI_DEV_HOST
+const tauriConfig = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, "./src-tauri/tauri.conf.json"), "utf8"),
+) as { version?: string }
+const appVersion = tauriConfig.version ?? "0.0.0"
 
 // https://vite.dev/config/
 export default defineConfig({
   clearScreen: false,
+  define: {
+    __TOKENMETER_VERSION__: JSON.stringify(appVersion),
+  },
   plugins: [react(), tailwindcss()],
   test: {
     environment: "jsdom",

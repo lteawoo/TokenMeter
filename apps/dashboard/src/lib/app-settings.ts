@@ -10,7 +10,7 @@ export type AppSettings = {
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  codexRootPath: "~/.codex/sessions",
+  codexRootPath: "~/.codex",
   themeMode: "dark",
   trayMetricMode: "weekly",
   trayPresentationMode: "text-only",

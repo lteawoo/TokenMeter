@@ -78,7 +78,6 @@ fn default_codex_root_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("~"))
         .join(".codex")
-        .join("sessions")
 }
 
 fn default_codex_root_path_string() -> String {
@@ -108,6 +107,18 @@ fn expand_home_path(value: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(value))
 }
 
+pub(crate) fn resolve_codex_sessions_dir(root: &Path) -> PathBuf {
+    if root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value == "sessions")
+    {
+        return root.to_path_buf();
+    }
+
+    root.join("sessions")
+}
+
 pub fn validate_codex_root_path(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -121,6 +132,11 @@ pub fn validate_codex_root_path(value: &str) -> Result<String, String> {
 
     if !canonical.is_dir() {
         return Err("Codex root path must point to a directory.".into());
+    }
+
+    let sessions_dir = resolve_codex_sessions_dir(&canonical);
+    if !sessions_dir.is_dir() {
+        return Err("Codex root path must contain a sessions directory.".into());
     }
 
     Ok(canonical.display().to_string())
@@ -180,8 +196,9 @@ pub fn save_app_settings<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_codex_root_path_string, load_settings_from_path, save_settings_to_path,
-        validate_codex_root_path, AppSettings, ThemeMode, TrayMetricMode, TrayPresentationMode,
+        default_codex_root_path_string, load_settings_from_path, resolve_codex_sessions_dir,
+        save_settings_to_path, validate_codex_root_path, AppSettings, ThemeMode, TrayMetricMode,
+        TrayPresentationMode,
     };
     use std::{
         env, fs,
@@ -208,8 +225,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_codex_root_path_rejects_root_without_sessions_dir() {
+        let root = unique_temp_dir("codex-root-no-sessions");
+
+        let result = validate_codex_root_path(&root.display().to_string());
+
+        assert_eq!(
+            result.expect_err("root without sessions should fail"),
+            "Codex root path must contain a sessions directory."
+        );
+    }
+
+    #[test]
     fn save_and_load_settings_round_trip() {
         let root = unique_temp_dir("codex-root");
+        fs::create_dir_all(resolve_codex_sessions_dir(&root)).expect("sessions dir should exist");
         let settings_file = unique_temp_dir("settings").join("settings.json");
         let settings = AppSettings {
             codex_root_path: root

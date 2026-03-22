@@ -3,15 +3,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CodexOverview, CodexSessionSummary, UsageTotals } from "@tokenmeter/core";
 import type { AppSettings } from "@/lib/app-settings";
+import type { AppUpdateState } from "@/lib/app-updates";
 
 import App from "./App";
 
 const getCodexOverviewMock = vi.hoisted(() => vi.fn());
+const checkForAppUpdatesMock = vi.hoisted(() => vi.fn());
+const getAppUpdateStateMock = vi.hoisted(() => vi.fn());
 const getDesktopWindowVisibilityMock = vi.hoisted(() => vi.fn());
 const getRuntimeKindMock = vi.hoisted(() => vi.fn());
 const getAppSettingsMock = vi.hoisted(() => vi.fn());
+const listenForAppUpdateStateChangesMock = vi.hoisted(() => vi.fn());
 const listenForAppSettingsUpdatesMock = vi.hoisted(() => vi.fn());
 const listenForDesktopWindowVisibilityMock = vi.hoisted(() => vi.fn());
+const openExternalUrlMock = vi.hoisted(() => vi.fn());
 const openDashboardViewMock = vi.hoisted(() => vi.fn());
 const openDashboardSettingsViewMock = vi.hoisted(() => vi.fn());
 const saveAppSettingsMock = vi.hoisted(() => vi.fn());
@@ -25,12 +30,16 @@ let desktopWindowVisibilityListener:
 let documentVisibilityState: DocumentVisibilityState = "visible";
 
 vi.mock("@/lib/codex-overview", () => ({
+  checkForAppUpdates: checkForAppUpdatesMock,
   getCodexOverview: getCodexOverviewMock,
+  getAppUpdateState: getAppUpdateStateMock,
   getDesktopWindowVisibility: getDesktopWindowVisibilityMock,
   getAppSettings: getAppSettingsMock,
   getRuntimeKind: getRuntimeKindMock,
+  listenForAppUpdateStateChanges: listenForAppUpdateStateChangesMock,
   listenForAppSettingsUpdates: listenForAppSettingsUpdatesMock,
   listenForDesktopWindowVisibility: listenForDesktopWindowVisibilityMock,
+  openExternalUrl: openExternalUrlMock,
   openDashboardView: openDashboardViewMock,
   openDashboardSettingsView: openDashboardSettingsViewMock,
   saveAppSettings: saveAppSettingsMock,
@@ -150,19 +159,32 @@ function emitDesktopWindowVisibility(visible: boolean) {
 }
 
 const desktopSettings = {
-  codexRootPath: "/Users/twlee/.codex/sessions",
+  codexRootPath: "/Users/twlee/.codex",
   themeMode: "light" as const,
   trayMetricMode: "both" as const,
   trayPresentationMode: "text-only" as const,
+};
+
+const latestAppUpdateState: AppUpdateState = {
+  status: "latest",
+  currentVersion: "0.1.2",
+  latestVersion: "0.1.2",
+  releaseUrl: "https://github.com/lteawoo/TokenMeter/releases/tag/v0.1.2",
+  checkedAt: "2026-03-22T08:30:00.000Z",
+  message: null,
+  homebrewUpgradeCommand: "brew update && brew upgrade --cask tokenmeter",
 };
 
 describe("App workspace scope selection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getCodexOverviewMock.mockResolvedValue(overview);
+    checkForAppUpdatesMock.mockResolvedValue(latestAppUpdateState);
+    getAppUpdateStateMock.mockResolvedValue(latestAppUpdateState);
     getDesktopWindowVisibilityMock.mockResolvedValue(true);
     getAppSettingsMock.mockResolvedValue(desktopSettings);
     getRuntimeKindMock.mockReturnValue("web");
+    openExternalUrlMock.mockResolvedValue(undefined);
     saveAppSettingsMock.mockImplementation(async (settings) => settings);
     settingsUpdateListener = null;
     desktopWindowVisibilityListener = null;
@@ -175,6 +197,11 @@ describe("App workspace scope selection", () => {
       settingsUpdateListener = listener;
       return () => {
         settingsUpdateListener = null;
+      };
+    });
+    listenForAppUpdateStateChangesMock.mockImplementation(async (listener) => {
+      return () => {
+        void listener;
       };
     });
     listenForDesktopWindowVisibilityMock.mockImplementation(async (_view, listener) => {
@@ -190,6 +217,8 @@ describe("App workspace scope selection", () => {
 
   it("filters dashboard summaries, charts, and session ledger by selected workspace", async () => {
     render(<App />);
+
+    expect(screen.getByText("v0.1.2 · CHECK UPDATES")).toBeInTheDocument();
 
     const memeplateRadio = await screen.findByRole("radio", {
       name: /projects\/memeplate/i,
@@ -275,14 +304,14 @@ describe("App workspace scope selection", () => {
 
     const codexRootInput = screen.getByLabelText("Codex root");
     fireEvent.change(codexRootInput, {
-      target: { value: "/Users/twlee/projects/.codex/sessions" },
+      target: { value: "/Users/twlee/projects/.codex" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: /save settings/i }));
 
     await waitFor(() => {
       expect(saveAppSettingsMock).toHaveBeenCalledWith({
-        codexRootPath: "/Users/twlee/projects/.codex/sessions",
+        codexRootPath: "/Users/twlee/projects/.codex",
         themeMode: "light",
         trayMetricMode: "five-hour",
         trayPresentationMode: "text-only",
@@ -327,6 +356,20 @@ describe("App workspace scope selection", () => {
     await waitFor(() => {
       expect(document.documentElement.dataset.theme).toBe("dark");
     });
+  });
+
+  it("shows the desktop update status and actions inside settings", async () => {
+    getRuntimeKindMock.mockReturnValue("desktop");
+
+    render(<App />);
+
+    const [settingsButton] = await screen.findAllByRole("button", { name: "Settings" });
+    fireEvent.click(settingsButton);
+
+    expect(await screen.findByText("LATEST")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /check for updates/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /open latest release/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /homebrew upgrade/i })).toBeInTheDocument();
   });
 
   it("polls the dashboard only while the document is visible", async () => {

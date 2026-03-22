@@ -96,7 +96,9 @@ fn default_codex_sessions_dir() -> Result<PathBuf, String> {
 
 fn codex_sessions_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let settings = settings::load_app_settings(app)?;
-    Ok(PathBuf::from(settings.codex_root_path))
+    Ok(settings::resolve_codex_sessions_dir(&PathBuf::from(
+        settings.codex_root_path,
+    )))
 }
 
 pub fn clamp_limit(limit: Option<usize>) -> usize {

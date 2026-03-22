@@ -1,5 +1,6 @@
 import type { CodexOverview } from "@tokenmeter/core";
 import type { AppSettings } from "@/lib/app-settings";
+import type { AppUpdateState } from "@/lib/app-updates";
 
 export type DesktopWindowView = "dashboard" | "panel";
 
@@ -12,6 +13,7 @@ const DEFAULT_LIMIT = 12;
 const TAURI_READY_TIMEOUT_MS = 5_000;
 const TAURI_READY_POLL_MS = 25;
 const DESKTOP_WINDOW_VISIBILITY_EVENT = "desktop-window-visibility-changed";
+const APP_UPDATE_STATE_EVENT = "app-update-state-changed";
 
 type DesktopWindowVisibilityPayload = {
   view: DesktopWindowView;
@@ -148,6 +150,23 @@ export async function saveAppSettings(settings: AppSettings) {
   return invokeDesktop<AppSettings>("save_app_settings", { settings });
 }
 
+export async function getAppUpdateState() {
+  return invokeDesktop<AppUpdateState>("get_app_update_state");
+}
+
+export async function checkForAppUpdates(force = false) {
+  return invokeDesktop<AppUpdateState>("check_for_app_updates", { force });
+}
+
+export async function openExternalUrl(url: string) {
+  if (isDesktopRuntime()) {
+    await invokeDesktop("open_external_url", { url });
+    return;
+  }
+
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
 export async function listenForAppSettingsUpdates(
   onUpdate: (settings: AppSettings) => void,
 ) {
@@ -189,6 +208,21 @@ export async function listenForDesktopWindowVisibility(
       }
     },
   );
+
+  return unlisten;
+}
+
+export async function listenForAppUpdateStateChanges(
+  onUpdate: (state: AppUpdateState) => void,
+) {
+  if (!isDesktopRuntime()) {
+    return () => {};
+  }
+
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<AppUpdateState>(APP_UPDATE_STATE_EVENT, (event) => {
+    onUpdate(event.payload);
+  });
 
   return unlisten;
 }

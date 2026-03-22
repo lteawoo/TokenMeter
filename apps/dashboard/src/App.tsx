@@ -15,6 +15,8 @@ import {
   ArrowUpFromLine,
   Bot,
   Clock3,
+  Copy,
+  ExternalLink,
   FolderCode,
   Gauge,
   RefreshCw,
@@ -76,12 +78,22 @@ import {
   applyThemeMode,
 } from "@/lib/app-settings";
 import {
+  type AppUpdateState,
+  createInitialAppUpdateState,
+  getAppUpdateStatusLabel,
+  shouldShowCompactUpdateCard,
+} from "@/lib/app-updates";
+import {
+  checkForAppUpdates,
+  getAppUpdateState,
   getCodexOverview,
   getAppSettings,
   getDesktopWindowVisibility,
   getRuntimeKind,
+  listenForAppUpdateStateChanges,
   listenForAppSettingsUpdates,
   listenForDesktopWindowVisibility,
+  openExternalUrl,
   openDashboardView,
   openDashboardSettingsView,
   saveAppSettings,
@@ -140,6 +152,7 @@ function formatTime(value: string | null | undefined) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    hour12: false,
   }).format(new Date(value));
 }
 
@@ -182,6 +195,8 @@ function getProviderLabel(provider: CodexOverview["provider"] | null | undefined
 const LOGO_ICON_SRC = "/logo-icon.png";
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000;
 const PANEL_REFRESH_INTERVAL_MS = 60_000;
+const MIN_OVERVIEW_SPINNER_MS = 450;
+const APP_VERSION_LABEL = `v${__TOKENMETER_VERSION__}`;
 
 function isDocumentVisible() {
   if (typeof document === "undefined") {
@@ -256,6 +271,129 @@ function CompactMetric({ label, value }: CompactMetricProps) {
   );
 }
 
+function ReleaseStatusBadge({
+  state,
+  className,
+}: {
+  state: AppUpdateState;
+  className?: string;
+}) {
+  const statusLabel = getAppUpdateStatusLabel(state.status);
+  const stateToneClassName =
+    state.status === "update-available"
+      ? "border-accent/60 text-accent"
+      : state.status === "offline"
+        ? "border-destructive/40 text-destructive"
+        : "";
+
+  return (
+    <Badge
+      variant="outline"
+      className={[stateToneClassName, className].filter(Boolean).join(" ")}
+    >
+      {APP_VERSION_LABEL} · {statusLabel}
+    </Badge>
+  );
+}
+
+function UpdateActionCard({
+  compact = false,
+  copiedHomebrewCommand,
+  onCheck,
+  onCopyHomebrew,
+  onOpenRelease,
+  state,
+}: {
+  compact?: boolean;
+  copiedHomebrewCommand: boolean;
+  onCheck: () => void;
+  onCopyHomebrew: () => void;
+  onOpenRelease: () => void;
+  state: AppUpdateState;
+}) {
+  const statusLabel = getAppUpdateStatusLabel(state.status);
+
+  return (
+    <Card
+      className={
+        compact
+          ? "border-border/70 bg-secondary/20"
+          : "border-border/70 bg-secondary/25"
+      }
+    >
+      <CardContent className={compact ? "grid gap-3 p-3" : "grid gap-4 p-4"}>
+        <div className="grid gap-1.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+                Updates
+              </p>
+              <Badge
+                variant="outline"
+                className={
+                  state.status === "update-available"
+                    ? "h-5 rounded-full border-accent/40 bg-accent/10 px-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-accent"
+                    : state.status === "offline"
+                      ? "h-5 rounded-full border-destructive/40 bg-destructive/10 px-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-destructive"
+                      : "h-5 rounded-full border-border/70 bg-background/55 px-1.5 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground"
+                }
+              >
+                {statusLabel}
+              </Badge>
+            </div>
+            <Button
+              aria-label="Check for updates"
+              className={compact ? "h-7 w-7 rounded-lg border-border/70 bg-background/55" : "h-8 w-8 rounded-xl border-border/70 bg-background/55"}
+              disabled={state.status === "checking"}
+              onClick={onCheck}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <RefreshCw className={`size-3.5 ${state.status === "checking" ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
+          <p className="font-mono text-[11px] text-muted-foreground">
+            Current {APP_VERSION_LABEL}
+            {state.latestVersion ? ` · Latest v${state.latestVersion}` : ""}
+          </p>
+          {state.checkedAt ? (
+            <p className="text-[11px] text-muted-foreground">
+              Last checked {formatTime(state.checkedAt)}
+            </p>
+          ) : null}
+          {state.message ? (
+            <p className="text-[11px] text-destructive">
+              {state.message}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            className={compact ? "h-8 rounded-lg px-3 text-xs" : "h-9 rounded-xl px-3 text-sm"}
+            onClick={onOpenRelease}
+            type="button"
+            variant="outline"
+          >
+            <ExternalLink />
+            Open Latest Release
+          </Button>
+          <Button
+            className={compact ? "h-8 rounded-lg px-3 text-xs" : "h-9 rounded-xl px-3 text-sm"}
+            onClick={onCopyHomebrew}
+            type="button"
+            variant="outline"
+          >
+            <Copy />
+            {copiedHomebrewCommand ? "Copied Homebrew Command" : "Homebrew Upgrade"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SessionDetailRow({
   label,
   value,
@@ -305,13 +443,18 @@ function App() {
   const [overview, setOverview] = useState<CodexOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [overviewPending, setOverviewPending] = useState(false);
+  const [manualRefreshFeedback, setManualRefreshFeedback] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>(() =>
+    createInitialAppUpdateState(__TOKENMETER_VERSION__),
+  );
+  const [copiedHomebrewCommand, setCopiedHomebrewCommand] = useState(false);
   const [selectedWorkspace, setSelectedWorkspace] = useState(ALL_WORKSPACES_VALUE);
   const runtimeKind = getRuntimeKind();
   const desktopView = getDesktopView();
@@ -325,10 +468,33 @@ function App() {
   const overviewRef = useRef<CodexOverview | null>(null);
   const requestInFlightRef = useRef(false);
   const settingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
+  const manualRefreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
+
+  useEffect(() => {
+    return () => {
+      if (manualRefreshTimerRef.current !== null) {
+        window.clearTimeout(manualRefreshTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!copiedHomebrewCommand) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCopiedHomebrewCommand(false);
+    }, 1_800);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [copiedHomebrewCommand]);
 
   useEffect(() => {
     const applyResolvedTheme = () => {
@@ -426,12 +592,12 @@ function App() {
     }
 
     requestInFlightRef.current = true;
+    setOverviewPending(true);
+    const startedAt = Date.now();
     const initialLoad = overviewRef.current === null;
 
     if (initialLoad) {
       setLoading(true);
-    } else {
-      setRefreshing(true);
     }
 
     try {
@@ -450,11 +616,34 @@ function App() {
         );
       });
     } finally {
+      const elapsedMs = Date.now() - startedAt;
+      const remainingSpinnerMs = Math.max(0, MIN_OVERVIEW_SPINNER_MS - elapsedMs);
+      if (remainingSpinnerMs > 0) {
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, remainingSpinnerMs);
+        });
+      }
+
       requestInFlightRef.current = false;
+      setOverviewPending(false);
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
+
+  const triggerManualOverviewRefresh = useCallback(async () => {
+    if (manualRefreshTimerRef.current !== null) {
+      window.clearTimeout(manualRefreshTimerRef.current);
+      manualRefreshTimerRef.current = null;
+    }
+
+    setManualRefreshFeedback(true);
+    await loadOverview();
+
+    manualRefreshTimerRef.current = window.setTimeout(() => {
+      setManualRefreshFeedback(false);
+      manualRefreshTimerRef.current = null;
+    }, MIN_OVERVIEW_SPINNER_MS);
+  }, [loadOverview]);
 
   useEffect(() => {
     void hydrateSettings();
@@ -500,6 +689,57 @@ function App() {
       detach?.();
     };
   }, [isDesktop, settingsOpen]);
+
+  useEffect(() => {
+    if (!isDesktop) {
+      return;
+    }
+
+    let cancelled = false;
+    let detach: (() => void) | undefined;
+
+    void getAppUpdateState()
+      .then((state) => {
+        if (!cancelled) {
+          setAppUpdateState(state);
+        }
+      })
+      .catch(() => {
+        // Keep the local fallback state when desktop update state isn't ready yet.
+      });
+
+    void listenForAppUpdateStateChanges((state) => {
+      if (!cancelled) {
+        setAppUpdateState(state);
+      }
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      detach = unlisten;
+    });
+
+    return () => {
+      cancelled = true;
+      detach?.();
+    };
+  }, [isDesktop]);
+
+  useEffect(() => {
+    if (!isDesktop || !windowVisible) {
+      return;
+    }
+
+    void checkForAppUpdates(false)
+      .then((state) => {
+        setAppUpdateState(state);
+      })
+      .catch(() => {
+        // Keep the current update state if the auto-check fails to start.
+      });
+  }, [isDesktop, windowVisible]);
 
   useEffect(() => {
     if (isDesktopPanel || !openSettingsFromQuery) {
@@ -565,6 +805,67 @@ function App() {
     [isDesktop, loadOverview],
   );
 
+  const handleCheckForUpdates = useCallback(async () => {
+    setAppUpdateState((currentState) => ({
+      ...currentState,
+      status: "checking",
+      message: null,
+    }));
+
+    if (!isDesktop) {
+      setAppUpdateState((currentState) => ({
+        ...currentState,
+        status: "offline",
+        message: "Update checks are only available in the desktop app.",
+      }));
+      return;
+    }
+
+    try {
+      const nextState = await checkForAppUpdates(true);
+      setAppUpdateState(nextState);
+    } catch (requestError) {
+      setAppUpdateState((currentState) => ({
+        ...currentState,
+        status: "offline",
+        message:
+          requestError instanceof Error
+            ? requestError.message
+            : "Failed to check for updates.",
+      }));
+    }
+  }, [isDesktop]);
+
+  const handleOpenLatestRelease = useCallback(async () => {
+    try {
+      await openExternalUrl(appUpdateState.releaseUrl);
+    } catch (requestError) {
+      setAppUpdateState((currentState) => ({
+        ...currentState,
+        message:
+          requestError instanceof Error
+            ? requestError.message
+            : "Failed to open the latest release.",
+      }));
+    }
+  }, [appUpdateState.releaseUrl]);
+
+  const handleCopyHomebrewCommand = useCallback(async () => {
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard) {
+        throw new Error("Clipboard access is unavailable.");
+      }
+
+      await navigator.clipboard.writeText(appUpdateState.homebrewUpgradeCommand);
+      setCopiedHomebrewCommand(true);
+    } catch {
+      setAppUpdateState((currentState) => ({
+        ...currentState,
+        message: "Failed to copy the Homebrew upgrade command.",
+      }));
+    }
+  }, [appUpdateState.homebrewUpgradeCommand]);
+
   const sessions = overview?.sessions ?? [];
   const workspaceSummaries = useMemo(
     () => buildWorkspaceScopeSummaries(sessions),
@@ -592,6 +893,8 @@ function App() {
 
   const latest = filteredSessions[0] ?? null;
   const providerLabel = getProviderLabel(overview?.provider);
+  const refreshControlPending = overviewPending || manualRefreshFeedback;
+  const compactUpdateCardVisible = shouldShowCompactUpdateCard(appUpdateState);
   const primaryRemaining = getRemainingPercent(latest?.primaryRateLimit?.usedPercent);
   const secondaryRemaining = getRemainingPercent(
     latest?.secondaryRateLimit?.usedPercent,
@@ -668,46 +971,63 @@ function App() {
             className="mx-auto flex min-h-[calc(100vh-0.75rem)] w-full max-w-md flex-col gap-2.5 rounded-[22px] border border-border/80 p-3 shadow-2xl shadow-black/20 backdrop-blur"
             style={{ background: "var(--panel-shell-background)" }}
           >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5">
-                <img
-                  alt="TokenMeter logo"
-                  className="h-8 w-8 object-contain"
-                  src={LOGO_ICON_SRC}
-                />
-                <div className="space-y-1">
-                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground">
-                    TokenMeter
-                  </p>
-                  <Badge className="h-6 rounded-full bg-accent px-2 text-[10px] text-accent-foreground hover:bg-accent">
-                    {providerLabel}
-                  </Badge>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <p className="font-mono text-[11px] text-muted-foreground">
-                  {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
-                </p>
-                <Button
-                  aria-label="Refresh"
-                  className="h-8 w-8 rounded-xl border-border/80 bg-background/55"
-                  onClick={() => {
-                    void loadOverview();
-                  }}
-                  disabled={refreshing}
-                  size="icon"
-                  type="button"
-                  variant="outline"
-                >
-                  <RefreshCw
-                    className={`size-4 ${refreshing ? "animate-spin" : ""}`}
-                  />
-                </Button>
-              </div>
-            </div>
+		            <div className="flex items-start justify-between gap-3">
+		              <div className="flex items-center gap-2.5">
+		                <img
+		                  alt="TokenMeter logo"
+		                  className="h-8 w-8 object-contain"
+		                  src={LOGO_ICON_SRC}
+		                />
+		                <div className="space-y-0.5">
+		                  <p className="font-mono text-[12px] font-semibold uppercase tracking-[0.12em] text-foreground">
+		                    TokenMeter
+		                  </p>
+		                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+		                    <Badge className="h-5 rounded-full bg-accent px-1.5 text-[9px] text-accent-foreground hover:bg-accent">
+		                      {providerLabel}
+		                    </Badge>
+		                    <span className="font-mono uppercase tracking-[0.08em]">
+		                      {APP_VERSION_LABEL} · {getAppUpdateStatusLabel(appUpdateState.status)}
+		                    </span>
+		                  </div>
+		                </div>
+		              </div>
+		              <div className="flex flex-col items-end gap-1">
+			                <Button
+			                  aria-label="Refresh"
+			                  className="h-7 w-7 rounded-xl border-border/80 bg-background/55"
+			                  onClick={() => {
+			                    void triggerManualOverviewRefresh();
+			                  }}
+		                  disabled={refreshControlPending}
+		                  size="icon"
+		                  type="button"
+		                  variant="outline"
+		                >
+			                  <RefreshCw className={`size-4 ${refreshControlPending ? "animate-spin" : ""}`} />
+		                </Button>
+		              </div>
+			            </div>
 
-            {error ? (
-              <Card className="border-destructive/40 bg-destructive/10">
+            {compactUpdateCardVisible ? (
+              <UpdateActionCard
+                compact
+                copiedHomebrewCommand={copiedHomebrewCommand}
+                onCheck={() => {
+                  void handleCheckForUpdates();
+                }}
+                onCopyHomebrew={() => {
+                  void handleCopyHomebrewCommand();
+                }}
+                onOpenRelease={() => {
+                  void handleOpenLatestRelease();
+                }}
+                state={appUpdateState}
+              />
+            ) : null}
+
+	            {error ? (
+	              <Card className="border-destructive/40 bg-destructive/10">
                 <CardContent className="p-3 text-sm text-destructive">
                   {error}
                 </CardContent>
@@ -787,15 +1107,21 @@ function App() {
             <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
               <div className="max-w-3xl space-y-5">
                 <div className="space-y-3">
-                  <div className="flex items-center gap-4 md:gap-5">
+                  <div className="flex flex-wrap items-center gap-2.5 md:gap-3">
                     <img
                       alt="TokenMeter logo"
                       className="h-11 w-11 shrink-0 object-contain md:h-14 md:w-14"
                       src={LOGO_ICON_SRC}
                     />
-                    <h1 className="font-mono text-4xl font-semibold tracking-tight text-foreground md:text-6xl">
-                      TokenMeter
-                    </h1>
+                    <div className="flex flex-wrap items-center gap-2 md:gap-2.5">
+                      <h1 className="font-mono text-4xl font-semibold tracking-tight text-foreground md:text-6xl">
+                        TokenMeter
+                      </h1>
+	                      <ReleaseStatusBadge
+                        className="h-6 rounded-full border-border/70 bg-background/45 px-2 font-mono text-[10px] tracking-normal text-muted-foreground md:h-7 md:px-2.5 md:text-[11px]"
+                        state={appUpdateState}
+                      />
+                    </div>
                   </div>
                   <p className="max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
                     Monitor local Codex activity in one place, including recent
@@ -857,19 +1183,17 @@ function App() {
                     </div>
                   </CardContent>
                 </Card>
-                <Button
-                  variant="outline"
-                  className="h-11 justify-between border-border/80 bg-background/55 font-mono sm:col-span-1"
-                  onClick={() => {
-                    void loadOverview();
-                  }}
-                  disabled={refreshing}
-                >
-                  Refresh
-                  <RefreshCw
-                    className={`size-4 ${refreshing ? "animate-spin" : ""}`}
-                  />
-                </Button>
+	                <Button
+	                  variant="outline"
+	                  className="h-11 justify-between border-border/80 bg-background/55 font-mono sm:col-span-1"
+	                  onClick={() => {
+	                    void triggerManualOverviewRefresh();
+	                  }}
+	                  disabled={refreshControlPending}
+	                >
+	                  Refresh
+	                  <RefreshCw className={`size-4 ${refreshControlPending ? "animate-spin" : ""}`} />
+	                </Button>
                 <Button
                   variant="outline"
                   className="h-11 justify-between border-border/80 bg-background/55 font-mono sm:col-span-1"
@@ -1362,6 +1686,21 @@ function App() {
         runtimeKind={runtimeKind}
         saving={settingsSaving}
         settings={settingsDraft}
+        supplementaryContent={
+          <UpdateActionCard
+            copiedHomebrewCommand={copiedHomebrewCommand}
+            onCheck={() => {
+              void handleCheckForUpdates();
+            }}
+            onCopyHomebrew={() => {
+              void handleCopyHomebrewCommand();
+            }}
+            onOpenRelease={() => {
+              void handleOpenLatestRelease();
+            }}
+            state={appUpdateState}
+          />
+        }
       />
       </main>
     </TooltipProvider>

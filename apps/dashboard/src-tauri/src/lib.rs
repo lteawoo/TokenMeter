@@ -1,8 +1,9 @@
-use std::{thread, time::Duration};
+use std::{process::Command, thread, time::Duration};
 
 mod codex;
 mod commands;
 mod settings;
+mod updates;
 
 use serde::Serialize;
 use tauri::{
@@ -17,6 +18,7 @@ const DASHBOARD_WINDOW_LABEL: &str = "dashboard";
 const TRAY_ID: &str = "tokenmeter-tray";
 const MENU_OPEN_DASHBOARD: &str = "open-dashboard";
 const MENU_REFRESH_DASHBOARD: &str = "refresh-dashboard";
+const MENU_CHECK_FOR_UPDATES: &str = "check-for-updates";
 const MENU_QUIT_APP: &str = "quit-app";
 const PANEL_WIDTH: f64 = 352.0;
 const PANEL_HEIGHT: f64 = 332.0;
@@ -166,6 +168,36 @@ pub(crate) fn refresh_tray_from_source<R: Runtime>(app: &AppHandle<R>) -> tauri:
     sync_tray_status(app, status_text, app_settings.tray_presentation_mode)
 }
 
+pub(crate) fn open_external_url(url: &str) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http:// and https:// URLs are allowed.".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn start_tray_refresh_loop<R: Runtime + 'static>(app: AppHandle<R>) {
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(TRAY_REFRESH_INTERVAL_SECS));
@@ -198,7 +230,9 @@ pub(crate) fn sync_tray_status<R: Runtime>(
 fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text(MENU_OPEN_DASHBOARD, "Open Dashboard")
-        .text(MENU_REFRESH_DASHBOARD, "Refresh")
+        .text(MENU_REFRESH_DASHBOARD, "Refresh Tray")
+        .separator()
+        .text(MENU_CHECK_FOR_UPDATES, "Check for Updates")
         .separator()
         .text(MENU_QUIT_APP, "Quit TokenMeter")
         .build()?;
@@ -211,6 +245,12 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             MENU_OPEN_DASHBOARD => show_dashboard_window(app, false),
             MENU_REFRESH_DASHBOARD => {
                 let _ = refresh_tray_from_source(app);
+            }
+            MENU_CHECK_FOR_UPDATES => {
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = updates::check_for_updates(&app_handle, true).await;
+                });
             }
             MENU_QUIT_APP => app.exit(0),
             _ => {}
@@ -236,6 +276,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(updates::AppUpdateStateStore::default())
         .on_window_event(|window, event| match (window.label(), event) {
             (MAIN_WINDOW_LABEL, WindowEvent::Focused(false)) => {
                 emit_window_visibility(window.app_handle(), "panel", false);
@@ -261,6 +302,10 @@ pub fn run() {
             configure_main_window(&app.handle());
             build_tray(&app.handle())?;
             start_tray_refresh_loop(app.handle().clone());
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = updates::check_for_updates(&app_handle, false).await;
+            });
 
             Ok(())
         })
@@ -268,7 +313,10 @@ pub fn run() {
             commands::get_codex_overview,
             commands::show_dashboard_window,
             commands::get_app_settings,
-            commands::save_app_settings
+            commands::save_app_settings,
+            commands::get_app_update_state,
+            commands::check_for_app_updates,
+            commands::open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
