@@ -3,6 +3,15 @@
 TokenMeter is a local-first desktop app for understanding Codex usage on your machine.
 It turns local session data into a compact menu bar view and a richer dashboard, so you can see where your sessions are going without sending that data to an external hosted service.
 
+<p align="center">
+  <img src="./docs/menu-bar.png" alt="TokenMeter menu bar popover" width="31%" />
+  <img src="./docs/dashboard.png" alt="TokenMeter desktop dashboard" width="66%" />
+</p>
+
+<p align="center">
+  Compact menu bar check-ins and a richer desktop dashboard.
+</p>
+
 ## Why TokenMeter
 
 - See recent Codex activity at a glance from the menu bar
