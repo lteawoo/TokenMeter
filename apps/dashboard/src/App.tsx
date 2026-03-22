@@ -21,7 +21,15 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, XAxis } from "recharts";
+import {
+  Area,
+  AreaChart,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -66,12 +74,33 @@ function formatNumber(value: number | null | undefined) {
   return (value ?? 0).toLocaleString();
 }
 
+function formatCompactTokenNumber(value: number | null | undefined) {
+  const numericValue = value ?? 0;
+  const absValue = Math.abs(numericValue);
+
+  if (absValue >= 1_000_000) {
+    const compactValue = numericValue / 1_000_000;
+    return `${compactValue >= 10 ? compactValue.toFixed(0) : compactValue.toFixed(1)}M`;
+  }
+
+  if (absValue >= 1_000) {
+    const compactValue = numericValue / 1_000;
+    return `${compactValue >= 10 ? compactValue.toFixed(0) : compactValue.toFixed(1)}K`;
+  }
+
+  return numericValue.toLocaleString();
+}
+
 function formatPercent(value: number | null | undefined) {
   return `${Math.round(value ?? 0)}%`;
 }
 
 function formatRemainingPercent(value: number | null | undefined) {
   return `${Math.max(0, 100 - Math.round(value ?? 0))}%`;
+}
+
+function formatSharePercent(value: number | null | undefined) {
+  return `${(value ?? 0).toFixed(1)}%`;
 }
 
 function getRemainingPercent(value: number | null | undefined) {
@@ -356,6 +385,12 @@ function App() {
           label: sessionLabel(session),
           totalTokens: session.totalUsage?.totalTokens ?? 0,
           lastTurnTokens: session.lastUsage?.totalTokens ?? 0,
+          lastTurnShare:
+            (session.totalUsage?.totalTokens ?? 0) > 0
+              ? (((session.lastUsage?.totalTokens ?? 0) /
+                  (session.totalUsage?.totalTokens ?? 0)) *
+                  100)
+              : 0,
         })),
     [filteredSessions],
   );
@@ -364,6 +399,10 @@ function App() {
     totalTokens: {
       label: "Session Total",
       color: "var(--chart-1)",
+    },
+    lastTurnShare: {
+      label: "Last Turn Share",
+      color: "var(--chart-2)",
     },
     lastTurnTokens: {
       label: "Last Turn",
@@ -677,7 +716,7 @@ function App() {
                         Usage flow
                       </CardTitle>
                       <CardDescription>
-                        Recent session totals versus last-turn spikes.
+                        Session totals versus last-turn share by session.
                       </CardDescription>
                     </div>
                     <Badge
@@ -715,6 +754,27 @@ function App() {
                             </linearGradient>
                           </defs>
                           <CartesianGrid vertical={false} />
+                          <YAxis
+                            axisLine={false}
+                            tickLine={false}
+                            tickMargin={12}
+                            width={72}
+                            tickFormatter={(value) =>
+                              formatCompactTokenNumber(Number(value))
+                            }
+                            yAxisId="tokens"
+                          />
+                          <YAxis
+                            axisLine={false}
+                            orientation="right"
+                            tickLine={false}
+                            tickMargin={12}
+                            tickFormatter={(value) =>
+                              formatSharePercent(Number(value))
+                            }
+                            width={52}
+                            yAxisId="share"
+                          />
                           <XAxis
                             axisLine={false}
                             dataKey="label"
@@ -723,7 +783,32 @@ function App() {
                             tickMargin={12}
                           />
                           <ChartTooltip
-                            content={<ChartTooltipContent indicator="line" />}
+                            content={
+                              <ChartTooltipContent
+                                indicator="line"
+                                formatter={(value, name, item) => (
+                                  <>
+                                    <div
+                                      className="w-1 shrink-0 rounded-[2px]"
+                                      style={{
+                                        backgroundColor:
+                                          item.payload.fill ?? item.color ?? "currentColor",
+                                      }}
+                                    />
+                                    <div className="flex flex-1 items-center justify-between leading-none">
+                                      <span className="text-muted-foreground">
+                                        {name}
+                                      </span>
+                                      <span className="font-mono font-medium tabular-nums text-foreground">
+                                        {name === "Last Turn Share"
+                                          ? formatSharePercent(Number(value))
+                                          : formatNumber(Number(value))}
+                                      </span>
+                                    </div>
+                                  </>
+                                )}
+                              />
+                            }
                           />
                           <ChartLegend content={<ChartLegendContent />} />
                           <Area
@@ -733,14 +818,16 @@ function App() {
                             stroke="var(--color-totalTokens)"
                             strokeWidth={2}
                             type="monotone"
+                            yAxisId="tokens"
                           />
                           <Area
-                            dataKey="lastTurnTokens"
+                            dataKey="lastTurnShare"
                             fillOpacity={0}
-                            stroke="var(--color-lastTurnTokens)"
+                            stroke="var(--color-lastTurnShare)"
                             strokeDasharray="6 4"
                             strokeWidth={2}
                             type="monotone"
+                            yAxisId="share"
                           />
                         </AreaChart>
                       </ChartContainer>
@@ -862,6 +949,15 @@ function App() {
                       >
                         <BarChart data={chartData}>
                           <CartesianGrid vertical={false} />
+                          <YAxis
+                            axisLine={false}
+                            tickLine={false}
+                            tickMargin={12}
+                            width={56}
+                            tickFormatter={(value) =>
+                              formatCompactTokenNumber(Number(value))
+                            }
+                          />
                           <XAxis
                             axisLine={false}
                             dataKey="label"
