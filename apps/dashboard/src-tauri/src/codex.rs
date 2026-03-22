@@ -1,0 +1,278 @@
+use std::{
+  env,
+  fs::{self, DirEntry, File},
+  io::{BufRead, BufReader},
+  path::{Path, PathBuf},
+};
+
+use chrono::{DateTime, SecondsFormat, Utc};
+use serde::Serialize;
+use serde_json::Value;
+
+const DEFAULT_LIMIT: usize = 12;
+const MIN_LIMIT: usize = 1;
+const MAX_LIMIT: usize = 25;
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+  input_tokens: u64,
+  cached_input_tokens: u64,
+  output_tokens: u64,
+  reasoning_output_tokens: u64,
+  total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitSnapshot {
+  used_percent: f64,
+  window_minutes: Option<u64>,
+  resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSessionSummary {
+  id: String,
+  file_path: String,
+  file_name: String,
+  model: Option<String>,
+  cwd: Option<String>,
+  updated_at: String,
+  total_usage: Option<UsageTotals>,
+  last_usage: Option<UsageTotals>,
+  primary_rate_limit: Option<RateLimitSnapshot>,
+  secondary_rate_limit: Option<RateLimitSnapshot>,
+  status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexOverview {
+  provider: String,
+  generated_at: String,
+  sessions_dir: String,
+  latest_session: Option<CodexSessionSummary>,
+  sessions: Vec<CodexSessionSummary>,
+  totals: UsageTotals,
+  last_turn_totals: UsageTotals,
+}
+
+impl CodexSessionSummary {
+  fn empty(file_path: &Path) -> Self {
+    let file_name = file_path
+      .file_name()
+      .and_then(|value| value.to_str())
+      .unwrap_or_default()
+      .to_string();
+
+    Self {
+      id: file_name.trim_end_matches(".jsonl").to_string(),
+      file_path: file_path.display().to_string(),
+      file_name,
+      model: None,
+      cwd: None,
+      updated_at: DateTime::<Utc>::from(std::time::UNIX_EPOCH)
+        .to_rfc3339_opts(SecondsFormat::Millis, true),
+      total_usage: None,
+      last_usage: None,
+      primary_rate_limit: None,
+      secondary_rate_limit: None,
+      status: "idle".into(),
+    }
+  }
+}
+
+fn codex_sessions_dir() -> Result<PathBuf, String> {
+  let home = env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+  Ok(PathBuf::from(home).join(".codex").join("sessions"))
+}
+
+pub fn clamp_limit(limit: Option<usize>) -> usize {
+  limit.unwrap_or(DEFAULT_LIMIT).clamp(MIN_LIMIT, MAX_LIMIT)
+}
+
+fn recursive_jsonl_files(dir: &Path) -> Vec<PathBuf> {
+  let mut files = Vec::new();
+  let entries = match fs::read_dir(dir) {
+    Ok(entries) => entries,
+    Err(_) => return files,
+  };
+
+  for entry in entries {
+    let entry: DirEntry = match entry {
+      Ok(entry) => entry,
+      Err(_) => continue,
+    };
+    let path = entry.path();
+
+    if path.is_dir() {
+      files.extend(recursive_jsonl_files(&path));
+    } else if path
+      .extension()
+      .and_then(|value| value.to_str())
+      .is_some_and(|value| value == "jsonl")
+    {
+      files.push(path);
+    }
+  }
+
+  files
+}
+
+fn usage_from_value(value: &Value) -> Option<UsageTotals> {
+  if !value.is_object() {
+    return None;
+  }
+
+  Some(UsageTotals {
+    input_tokens: value["input_tokens"].as_u64().unwrap_or(0),
+    cached_input_tokens: value["cached_input_tokens"].as_u64().unwrap_or(0),
+    output_tokens: value["output_tokens"].as_u64().unwrap_or(0),
+    reasoning_output_tokens: value["reasoning_output_tokens"].as_u64().unwrap_or(0),
+    total_tokens: value["total_tokens"].as_u64().unwrap_or(0),
+  })
+}
+
+fn rate_limit_from_value(value: &Value) -> Option<RateLimitSnapshot> {
+  if !value.is_object() {
+    return None;
+  }
+
+  let resets_at = value["resets_at"]
+    .as_i64()
+    .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+    .map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true));
+
+  Some(RateLimitSnapshot {
+    used_percent: value["used_percent"].as_f64().unwrap_or(0.0),
+    window_minutes: value["window_minutes"].as_u64(),
+    resets_at,
+  })
+}
+
+fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
+  if let Some(value) = right {
+    left.input_tokens += value.input_tokens;
+    left.cached_input_tokens += value.cached_input_tokens;
+    left.output_tokens += value.output_tokens;
+    left.reasoning_output_tokens += value.reasoning_output_tokens;
+    left.total_tokens += value.total_tokens;
+  }
+}
+
+fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
+  let mut summary = CodexSessionSummary::empty(path);
+  let file = File::open(path).map_err(|err| err.to_string())?;
+  let reader = BufReader::new(file);
+
+  for line in reader.lines() {
+    let line = line.map_err(|err| err.to_string())?;
+    if line.trim().is_empty() {
+      continue;
+    }
+
+    let event: Value = match serde_json::from_str(&line) {
+      Ok(value) => value,
+      Err(_) => continue,
+    };
+
+    if event["type"].as_str() == Some("turn_context") {
+      let payload = &event["payload"];
+      summary.cwd = payload["cwd"].as_str().map(str::to_string).or(summary.cwd);
+      summary.model = payload["model"].as_str().map(str::to_string).or(summary.model);
+      summary.id = payload["turn_id"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or(summary.id);
+    }
+
+    if event["type"].as_str() == Some("event_msg")
+      && event["payload"]["type"].as_str() == Some("token_count")
+    {
+      let info = &event["payload"]["info"];
+      summary.total_usage =
+        usage_from_value(&info["total_token_usage"]).or(summary.total_usage);
+      summary.last_usage =
+        usage_from_value(&info["last_token_usage"]).or(summary.last_usage);
+      summary.primary_rate_limit = rate_limit_from_value(&event["payload"]["rate_limits"]["primary"])
+        .or(summary.primary_rate_limit);
+      summary.secondary_rate_limit =
+        rate_limit_from_value(&event["payload"]["rate_limits"]["secondary"])
+          .or(summary.secondary_rate_limit);
+      summary.updated_at = event["timestamp"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or(summary.updated_at);
+    }
+  }
+
+  if summary.updated_at.starts_with("1970-01-01") {
+    let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let modified = metadata.modified().map_err(|err| err.to_string())?;
+    summary.updated_at =
+      DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true);
+  }
+
+  let updated = DateTime::parse_from_rfc3339(&summary.updated_at)
+    .map(|value| value.with_timezone(&Utc))
+    .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::UNIX_EPOCH));
+  let is_active = Utc::now().signed_duration_since(updated).num_minutes() < 15;
+  summary.status = if is_active { "active" } else { "idle" }.into();
+
+  Ok(summary)
+}
+
+pub fn get_codex_overview(limit: usize) -> Result<CodexOverview, String> {
+  let sessions_dir = codex_sessions_dir()?;
+  let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
+  if !sessions_dir.is_dir() {
+    return Ok(CodexOverview {
+      provider: "codex".into(),
+      generated_at,
+      sessions_dir: sessions_dir.display().to_string(),
+      latest_session: None,
+      sessions: Vec::new(),
+      totals: UsageTotals::default(),
+      last_turn_totals: UsageTotals::default(),
+    });
+  }
+
+  let mut files_with_meta = recursive_jsonl_files(&sessions_dir)
+    .into_iter()
+    .filter_map(|path| {
+      let modified = fs::metadata(&path).ok()?.modified().ok()?;
+      Some((path, modified))
+    })
+    .collect::<Vec<_>>();
+
+  files_with_meta.sort_by(|left, right| right.1.cmp(&left.1));
+
+  let mut sessions = files_with_meta
+    .into_iter()
+    .take(limit)
+    .filter_map(|(path, _)| parse_session_file(&path).ok())
+    .collect::<Vec<_>>();
+
+  sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+
+  let mut totals = UsageTotals::default();
+  let mut last_turn_totals = UsageTotals::default();
+
+  for session in &sessions {
+    add_usage(&mut totals, &session.total_usage);
+    add_usage(&mut last_turn_totals, &session.last_usage);
+  }
+
+  Ok(CodexOverview {
+    provider: "codex".into(),
+    generated_at,
+    sessions_dir: sessions_dir.display().to_string(),
+    latest_session: sessions.first().cloned(),
+    sessions,
+    totals,
+    last_turn_totals,
+  })
+}

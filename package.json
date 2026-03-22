@@ -1,0 +1,17 @@
+{
+  "name": "tokenmeter",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.24.0",
+  "scripts": {
+    "dev": "concurrently -n server,dashboard -c green,blue \"pnpm --filter @tokenmeter/server dev\" \"pnpm --filter @tokenmeter/dashboard dev\"",
+    "dev:dashboard": "pnpm --filter @tokenmeter/dashboard dev",
+    "dev:server": "pnpm --filter @tokenmeter/server dev",
+    "dev:desktop": "concurrently -n server,desktop -c green,blue \"pnpm --filter @tokenmeter/server dev\" \"pnpm --filter @tokenmeter/dashboard tauri:dev\"",
+    "build:desktop": "pnpm --filter @tokenmeter/dashboard tauri:build",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
