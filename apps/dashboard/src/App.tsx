@@ -18,6 +18,7 @@ import {
   FolderCode,
   Gauge,
   RefreshCw,
+  Settings2,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
@@ -33,6 +34,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SettingsSheet } from "@/components/settings-sheet";
 import {
   DashboardWorkspaceSelector,
   PanelWorkspaceSelector,
@@ -69,9 +71,20 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
+  DEFAULT_APP_SETTINGS,
+  type AppSettings,
+  applyThemeMode,
+  formatTrayStatus,
+} from "@/lib/app-settings";
+import {
   getCodexOverview,
+  getAppSettings,
   getRuntimeKind,
+  listenForAppSettingsUpdates,
   openDashboardView,
+  openDashboardSettingsView,
+  saveAppSettings,
+  syncTrayStatus,
 } from "@/lib/codex-overview";
 import {
   ALL_WORKSPACES_VALUE,
@@ -148,6 +161,14 @@ function getDesktopView() {
   }
 
   return new URLSearchParams(window.location.search).get("view") ?? "dashboard";
+}
+
+function shouldOpenSettingsFromQuery() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("settings") === "1";
 }
 
 function getProviderLabel(provider: CodexOverview["provider"] | null | undefined) {
@@ -254,15 +275,72 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [selectedWorkspace, setSelectedWorkspace] = useState(ALL_WORKSPACES_VALUE);
   const runtimeKind = getRuntimeKind();
   const desktopView = getDesktopView();
+  const openSettingsFromQuery = shouldOpenSettingsFromQuery();
   const isDesktop = runtimeKind === "desktop";
   const isDesktopPanel = isDesktop && desktopView === "panel";
   const overviewRef = useRef<CodexOverview | null>(null);
   const requestInFlightRef = useRef(false);
+  const settingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
 
-  const loadOverview = useCallback(async () => {
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    const applyResolvedTheme = () => {
+      applyThemeMode(settings.themeMode);
+    };
+
+    applyResolvedTheme();
+
+    if (settings.themeMode !== "system") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    mediaQuery.addEventListener("change", applyResolvedTheme);
+
+    return () => {
+      mediaQuery.removeEventListener("change", applyResolvedTheme);
+    };
+  }, [settings.themeMode]);
+
+  const hydrateSettings = useCallback(async () => {
+    if (!isDesktop) {
+      setSettingsLoaded(true);
+      return;
+    }
+
+    try {
+      const payload = await getAppSettings();
+      startTransition(() => {
+        settingsRef.current = payload;
+        setSettings(payload);
+        setSettingsDraft(payload);
+      });
+    } catch (requestError) {
+      startTransition(() => {
+        setError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Failed to load TokenMeter settings.",
+        );
+      });
+    } finally {
+      setSettingsLoaded(true);
+    }
+  }, [isDesktop]);
+
+  const loadOverview = useCallback(async (settingsOverride?: AppSettings) => {
     if (requestInFlightRef.current) {
       return;
     }
@@ -278,11 +356,23 @@ function App() {
 
     try {
       const payload = await getCodexOverview();
+      const activeSettings = settingsOverride ?? settingsRef.current;
       startTransition(() => {
         overviewRef.current = payload;
         setOverview(payload);
         setError(null);
       });
+
+      if (isDesktop) {
+        try {
+          await syncTrayStatus(
+            formatTrayStatus(payload.latestSession, activeSettings),
+            activeSettings.trayPresentationMode,
+          );
+        } catch (traySyncError) {
+          console.error("Failed to sync tray status.", traySyncError);
+        }
+      }
     } catch (requestError) {
       startTransition(() => {
         setError(
@@ -296,9 +386,72 @@ function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [isDesktop]);
 
   useEffect(() => {
+    void hydrateSettings();
+  }, [hydrateSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen) {
+      setSettingsDraft(settings);
+    }
+  }, [settings, settingsOpen]);
+
+  useEffect(() => {
+    if (!isDesktop) {
+      return;
+    }
+
+    let cancelled = false;
+    let detach: (() => void) | undefined;
+
+    void listenForAppSettingsUpdates((nextSettings) => {
+      if (cancelled) {
+        return;
+      }
+
+      startTransition(() => {
+        settingsRef.current = nextSettings;
+        setSettings(nextSettings);
+        if (!settingsOpen) {
+          setSettingsDraft(nextSettings);
+        }
+      });
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      detach = unlisten;
+    });
+
+    return () => {
+      cancelled = true;
+      detach?.();
+    };
+  }, [isDesktop, settingsOpen]);
+
+  useEffect(() => {
+    if (isDesktopPanel || !openSettingsFromQuery) {
+      return;
+    }
+
+    setSettingsDraft(settingsRef.current);
+    setSettingsError(null);
+    setSettingsOpen(true);
+
+    const url = new URL(window.location.href);
+    url.searchParams.delete("settings");
+    window.history.replaceState({}, "", url.toString());
+  }, [isDesktopPanel, openSettingsFromQuery]);
+
+  useEffect(() => {
+    if (!settingsLoaded) {
+      return;
+    }
+
     void loadOverview();
     const intervalId = window.setInterval(() => {
       void loadOverview();
@@ -307,7 +460,37 @@ function App() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isDesktopPanel, loadOverview]);
+  }, [isDesktopPanel, loadOverview, settingsLoaded]);
+
+  const handleSaveSettings = useCallback(
+    async (nextSettings: AppSettings) => {
+      setSettingsError(null);
+      setSettingsSaving(true);
+
+      try {
+        const savedSettings = isDesktop
+          ? await saveAppSettings(nextSettings)
+          : nextSettings;
+
+        startTransition(() => {
+          settingsRef.current = savedSettings;
+          setSettings(savedSettings);
+        });
+
+        await loadOverview(savedSettings);
+        setSettingsOpen(false);
+      } catch (requestError) {
+        setSettingsError(
+          requestError instanceof Error
+            ? requestError.message
+            : "Failed to save settings.",
+        );
+      } finally {
+        setSettingsSaving(false);
+      }
+    },
+    [isDesktop, loadOverview],
+  );
 
   const sessions = overview?.sessions ?? [];
   const workspaceSummaries = useMemo(
@@ -408,14 +591,34 @@ function App() {
     return (
       <TooltipProvider delayDuration={120}>
         <main className="min-h-screen bg-transparent p-1.5">
-          <div className="mx-auto flex min-h-[calc(100vh-0.75rem)] w-full max-w-md flex-col gap-2.5 rounded-[22px] border border-border/80 bg-[#0b1410]/96 p-3 shadow-2xl shadow-black/40 backdrop-blur">
+          <div
+            className="mx-auto flex min-h-[calc(100vh-0.75rem)] w-full max-w-md flex-col gap-2.5 rounded-[22px] border border-border/80 p-3 shadow-2xl shadow-black/20 backdrop-blur"
+            style={{ background: "var(--panel-shell-background)" }}
+          >
             <div className="flex items-center justify-between gap-3">
               <Badge className="h-7 rounded-full bg-accent px-2.5 text-[11px] text-accent-foreground hover:bg-accent">
                 {providerLabel}
               </Badge>
-              <p className="font-mono text-[11px] text-muted-foreground">
-                {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="font-mono text-[11px] text-muted-foreground">
+                  {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
+                </p>
+                <Button
+                  aria-label="Refresh"
+                  className="h-8 w-8 rounded-xl border-border/80 bg-background/55"
+                  onClick={() => {
+                    void loadOverview();
+                  }}
+                  disabled={refreshing}
+                  size="icon"
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCw
+                    className={`size-4 ${refreshing ? "animate-spin" : ""}`}
+                  />
+                </Button>
+              </div>
             </div>
 
             {error ? (
@@ -461,17 +664,16 @@ function App() {
 
             <div className="mt-auto flex items-center gap-2">
               <Button
-                variant="outline"
-                size="icon"
+                aria-label="Open dashboard"
                 className="h-9 w-9 shrink-0 rounded-xl border-border/80 bg-background/55"
                 onClick={() => {
-                  void loadOverview();
+                  void openDashboardSettingsView();
                 }}
-                disabled={refreshing}
+                size="icon"
+                type="button"
+                variant="outline"
               >
-                <RefreshCw
-                  className={`size-4 ${refreshing ? "animate-spin" : ""}`}
-                />
+                <Settings2 className="size-4" />
               </Button>
               <Button
                 className="h-9 flex-1 justify-between rounded-xl bg-accent px-3 font-mono text-accent-foreground hover:bg-accent/90"
@@ -491,7 +693,10 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={120}>
-      <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgba(34,197,94,0.12),transparent_24%),radial-gradient(circle_at_top_left,rgba(59,130,246,0.18),transparent_28%)] px-4 py-6 md:px-8 md:py-8">
+      <main
+        className="min-h-screen px-4 py-6 md:px-8 md:py-8"
+        style={{ background: "var(--app-shell-background)" }}
+      >
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
           <section className="overflow-hidden rounded-3xl border border-border/70 bg-card/75 p-6 shadow-2xl shadow-black/20 backdrop-blur md:p-8">
             <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
@@ -562,16 +767,29 @@ function App() {
                 </Card>
                 <Button
                   variant="outline"
-                  className="col-span-full h-11 justify-between border-border/80 bg-background/55 font-mono"
+                  className="h-11 justify-between border-border/80 bg-background/55 font-mono sm:col-span-1"
                   onClick={() => {
                     void loadOverview();
                   }}
                   disabled={refreshing}
                 >
-                  Refresh dashboard
+                  Refresh
                   <RefreshCw
                     className={`size-4 ${refreshing ? "animate-spin" : ""}`}
                   />
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-11 justify-between border-border/80 bg-background/55 font-mono sm:col-span-1"
+                  onClick={() => {
+                    setSettingsDraft(settingsRef.current);
+                    setSettingsError(null);
+                    setSettingsOpen(true);
+                  }}
+                  type="button"
+                >
+                  Settings
+                  <Settings2 className="size-4" />
                 </Button>
               </div>
             </div>
@@ -1068,6 +1286,19 @@ function App() {
             </TabsContent>
           </Tabs>
         </div>
+      <SettingsSheet
+        error={settingsError}
+        onChange={setSettingsDraft}
+        onClose={() => {
+          setSettingsOpen(false);
+          setSettingsError(null);
+        }}
+        onSave={handleSaveSettings}
+        open={settingsOpen}
+        runtimeKind={runtimeKind}
+        saving={settingsSaving}
+        settings={settingsDraft}
+      />
       </main>
     </TooltipProvider>
   );

@@ -7,4 +7,5 @@ packages/**/dist
 __pycache__
 *.pyc
 .codex/
+.serena/
 openspec/

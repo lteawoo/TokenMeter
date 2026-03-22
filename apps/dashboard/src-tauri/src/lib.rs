@@ -1,5 +1,6 @@
 mod codex;
 mod commands;
+mod settings;
 
 use tauri::{
   menu::MenuBuilder,
@@ -46,8 +47,20 @@ fn configure_main_window<R: Runtime>(app: &AppHandle<R>) {
   }
 }
 
-pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_settings: bool) {
+  let target_url = if open_settings {
+    "index.html?view=dashboard&settings=1"
+  } else {
+    "index.html?view=dashboard"
+  };
+
   if let Some(window) = dashboard_window(app) {
+    if let Ok(mut url) = window.url() {
+      if url.path().ends_with("index.html") || url.scheme() == "tauri" || url.scheme() == "http" || url.scheme() == "https" {
+        url.set_query(Some(if open_settings { "view=dashboard&settings=1" } else { "view=dashboard" }));
+        let _ = window.navigate(url);
+      }
+    }
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
@@ -57,7 +70,7 @@ pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) {
   let Ok(window) = WebviewWindowBuilder::new(
     app,
     DASHBOARD_WINDOW_LABEL,
-    WebviewUrl::App("index.html?view=dashboard".into()),
+    WebviewUrl::App(target_url.into()),
   )
   .title("TokenMeter Dashboard")
   .inner_size(1200.0, 820.0)
@@ -121,7 +134,30 @@ fn refresh_dashboard<R: Runtime>(app: &AppHandle<R>) {
   }
 }
 
+pub(crate) fn sync_tray_status<R: Runtime>(
+  app: &AppHandle<R>,
+  status_text: Option<String>,
+  _tray_presentation_mode: settings::TrayPresentationMode,
+) -> tauri::Result<()> {
+  let Some(tray) = app.tray_by_id(TRAY_ID) else {
+    return Ok(());
+  };
+
+  tray.set_icon(None)?;
+
+  tray.set_title(status_text.clone())?;
+  tray.set_tooltip(
+    status_text
+      .as_ref()
+      .map(|value| format!("TokenMeter · {value}"))
+      .or_else(|| Some("TokenMeter".to_string())),
+  )?;
+
+  Ok(())
+}
+
 fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+  let app_settings = settings::load_app_settings(app).unwrap_or_default();
   let menu = MenuBuilder::new(app)
     .text(MENU_OPEN_DASHBOARD, "Open Dashboard")
     .text(MENU_REFRESH_DASHBOARD, "Refresh")
@@ -129,12 +165,12 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     .text(MENU_QUIT_APP, "Quit TokenMeter")
     .build()?;
 
-  let mut tray = TrayIconBuilder::with_id(TRAY_ID)
+  let tray = TrayIconBuilder::with_id(TRAY_ID)
     .menu(&menu)
     .tooltip("TokenMeter")
     .show_menu_on_left_click(false)
     .on_menu_event(|app, event| match event.id().0.as_str() {
-      MENU_OPEN_DASHBOARD => show_dashboard_window(app),
+      MENU_OPEN_DASHBOARD => show_dashboard_window(app, false),
       MENU_REFRESH_DASHBOARD => refresh_dashboard(app),
       MENU_QUIT_APP => app.exit(0),
       _ => {}
@@ -155,16 +191,8 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
       }
     });
 
-  if let Some(icon) = app.default_window_icon().cloned() {
-    tray = tray.icon(icon);
-  }
-
-  #[cfg(target_os = "macos")]
-  {
-    tray = tray.icon_as_template(true);
-  }
-
   tray.build(app)?;
+  sync_tray_status(app, None, app_settings.tray_presentation_mode)?;
 
   Ok(())
 }
@@ -197,7 +225,10 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       commands::get_codex_overview,
-      commands::show_dashboard_window
+      commands::show_dashboard_window,
+      commands::get_app_settings,
+      commands::save_app_settings,
+      commands::sync_tray_status
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
