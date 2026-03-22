@@ -179,6 +179,8 @@ function getProviderLabel(provider: CodexOverview["provider"] | null | undefined
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
+const LOGO_ICON_SRC = "/logo-icon.png";
+
 function CompactStatTile({
   label,
   value,
@@ -240,6 +242,25 @@ function CompactMetric({ label, value }: CompactMetricProps) {
       <span className="max-w-[11rem] truncate text-right font-mono text-xs font-semibold text-foreground">
         {value}
       </span>
+    </div>
+  );
+}
+
+function SessionDetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-b border-border/50 py-3 last:border-b-0">
+      <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+        {label}
+      </p>
+      <div className="min-w-0 text-right font-mono text-sm font-medium text-foreground">
+        {value}
+      </div>
     </div>
   );
 }
@@ -596,9 +617,21 @@ function App() {
             style={{ background: "var(--panel-shell-background)" }}
           >
             <div className="flex items-center justify-between gap-3">
-              <Badge className="h-7 rounded-full bg-accent px-2.5 text-[11px] text-accent-foreground hover:bg-accent">
-                {providerLabel}
-              </Badge>
+              <div className="flex items-center gap-2.5">
+                <img
+                  alt="TokenMeter logo"
+                  className="h-8 w-8 object-contain"
+                  src={LOGO_ICON_SRC}
+                />
+                <div className="space-y-1">
+                  <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.18em] text-foreground">
+                    TokenMeter
+                  </p>
+                  <Badge className="h-6 rounded-full bg-accent px-2 text-[10px] text-accent-foreground hover:bg-accent">
+                    {providerLabel}
+                  </Badge>
+                </div>
+              </div>
               <div className="flex items-center gap-2">
                 <p className="font-mono text-[11px] text-muted-foreground">
                   {formatTime(latest?.updatedAt ?? overview?.generatedAt)}
@@ -700,11 +733,18 @@ function App() {
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
           <section className="overflow-hidden rounded-3xl border border-border/70 bg-card/75 p-6 shadow-2xl shadow-black/20 backdrop-blur md:p-8">
             <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-              <div className="max-w-3xl space-y-4">
+              <div className="max-w-3xl space-y-5">
                 <div className="space-y-3">
-                  <h1 className="font-mono text-4xl font-semibold tracking-tight text-foreground md:text-6xl">
-                    TokenMeter
-                  </h1>
+                  <div className="flex items-center gap-4 md:gap-5">
+                    <img
+                      alt="TokenMeter logo"
+                      className="h-11 w-11 shrink-0 object-contain md:h-14 md:w-14"
+                      src={LOGO_ICON_SRC}
+                    />
+                    <h1 className="font-mono text-4xl font-semibold tracking-tight text-foreground md:text-6xl">
+                      TokenMeter
+                    </h1>
+                  </div>
                   <p className="max-w-2xl text-sm leading-7 text-muted-foreground md:text-base">
                     Monitor local Codex activity in one place, including recent
                     session usage, plan-limit headroom, and token flow across
@@ -1013,88 +1053,60 @@ function App() {
                 </Card>
 
                 <Card className="border-border/70 bg-card/80 backdrop-blur">
-                  <CardHeader>
-                    <CardTitle className="font-mono text-xl">
-                      Latest session
-                    </CardTitle>
-                    <CardDescription>
-                      Highest signal details from the most recent run.
-                    </CardDescription>
+                  <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+                    <div>
+                      <CardTitle className="font-mono text-xl">
+                        Latest session
+                      </CardTitle>
+                      <CardDescription>
+                        Highest signal details from the most recent run.
+                      </CardDescription>
+                    </div>
+                    <Badge
+                      className={
+                        latest?.status === "active"
+                          ? "bg-accent text-accent-foreground hover:bg-accent"
+                          : "bg-secondary text-secondary-foreground"
+                      }
+                    >
+                      {latest?.status ?? "none"}
+                    </Badge>
                   </CardHeader>
-                  <CardContent className="grid gap-4">
+                  <CardContent>
                     {latest ? (
-                      <>
-                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-border/70 bg-secondary/50 p-4">
-                          <div>
-                            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                              Status
-                            </p>
-                            <p className="mt-1 font-mono text-lg font-semibold">
-                              {latest.status}
-                            </p>
-                          </div>
-                          <Badge
-                            className={
-                              latest.status === "active"
-                                ? "bg-accent text-accent-foreground hover:bg-accent"
-                                : "bg-secondary text-secondary-foreground"
-                            }
-                          >
-                            {latest.status}
-                          </Badge>
-                        </div>
-
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
-                            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                              Model
-                            </p>
-                            <p className="mt-2 font-mono text-lg font-semibold">
-                              {formatModelLabel(latest)}
-                            </p>
-                          </div>
-                          <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
-                            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                              Updated
-                            </p>
-                            <p className="mt-2 font-mono text-lg font-semibold">
-                              {formatTime(latest.updatedAt)}
-                            </p>
-                          </div>
-                          <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
-                            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                              Last turn
-                            </p>
-                            <p className="mt-2 font-mono text-lg font-semibold">
-                              {formatNumber(latest.lastUsage?.totalTokens)}
-                            </p>
-                          </div>
-                          <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
-                            <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                              Session total
-                            </p>
-                            <p className="mt-2 font-mono text-lg font-semibold">
-                              {formatNumber(latest.totalUsage?.totalTokens)}
-                            </p>
-                          </div>
-                        </div>
-
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <div className="rounded-2xl border border-dashed border-border/70 bg-background/40 p-4 text-sm text-muted-foreground">
-                              <p className="mb-2 text-xs uppercase tracking-[0.18em]">
-                                Workspace
-                              </p>
-                              <p className="truncate font-mono text-foreground">
+                      <div className="rounded-2xl border border-border/70 bg-background/35 px-4">
+                        <SessionDetailRow
+                          label="Model"
+                          value={formatModelLabel(latest)}
+                        />
+                        <SessionDetailRow
+                          label="Updated"
+                          value={formatTime(latest.updatedAt)}
+                        />
+                        <SessionDetailRow
+                          label="Last turn"
+                          value={formatNumber(latest.lastUsage?.totalTokens)}
+                        />
+                        <SessionDetailRow
+                          label="Session total"
+                          value={formatNumber(latest.totalUsage?.totalTokens)}
+                        />
+                        <SessionDetailRow
+                          label="Workspace"
+                          value={
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <p className="max-w-[15rem] truncate text-right">
+                                  {getWorkspaceValue(latest)}
+                                </p>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-sm font-mono text-xs">
                                 {getWorkspaceValue(latest)}
-                              </p>
-                            </div>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-sm font-mono text-xs">
-                            {getWorkspaceValue(latest)}
-                          </TooltipContent>
-                        </Tooltip>
-                      </>
+                              </TooltipContent>
+                            </Tooltip>
+                          }
+                        />
+                      </div>
                     ) : (
                       <div className="text-sm text-muted-foreground">
                         No recent session detected yet.

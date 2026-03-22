@@ -72,7 +72,7 @@ pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_setting
     DASHBOARD_WINDOW_LABEL,
     WebviewUrl::App(target_url.into()),
   )
-  .title("TokenMeter Dashboard")
+  .title("TokenMeter")
   .inner_size(1200.0, 820.0)
   .min_inner_size(960.0, 680.0)
   .resizable(true)

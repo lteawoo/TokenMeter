@@ -1,6 +1,6 @@
 # TokenMeter Branding Direction
 
-This directory now holds one focused direction for TokenMeter instead of multiple exploratory marks.
+This directory now holds the currently selected TokenMeter logo direction.
 
 ## Concept
 
@@ -18,16 +18,14 @@ The intended reading order is:
 
 ## Files
 
-- `tokenmeter-symbol-primary.svg`: primary brand symbol
-- `tokenmeter-wordmark-primary.svg`: symbol plus wordmark lockup
-- `tokenmeter-menubar-primary.svg`: monochrome menu bar derivative
+- `logo.png`: source logo artwork used as the base for dashboard branding and desktop app icon generation
 
 ## Direction Notes
 
-- The amber arc is the primary meter signal
-- The cyan accent is the supporting token/activity cue
-- The menu bar mark removes secondary accents and keeps only the most readable gauge geometry
+- The overlapping circular forms make the mark read as a measured token rather than a generic abstract orb
+- The blue-to-green blend is the primary visual identifier for the brand
+- Desktop app bundle icons are generated from this artwork with a dedicated icon background for macOS visibility
 
 ## Next Step
 
-If this direction is accepted, the next step is to convert it into release-ready app icon assets in `apps/dashboard/src-tauri/icons`.
+If this direction changes again, regenerate the desktop icon assets in `apps/dashboard/src-tauri/icons`.
