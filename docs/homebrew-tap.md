@@ -12,6 +12,13 @@ brew tap lteawoo/tokenmeter
 brew install --cask tokenmeter
 ```
 
+Update command:
+
+```bash
+brew update
+brew upgrade --cask tokenmeter
+```
+
 This keeps the app source repository and the Homebrew packaging repository separate.
 The current repository includes a ready-to-publish cask at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
 The tap repository is now published at `lteawoo/homebrew-tokenmeter`.
@@ -35,7 +42,7 @@ homebrew-tokenmeter/
 ## Current Cask
 
 The current cask lives at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
-It points at the published `v0.1.0` DMG asset and includes the current SHA256.
+It points at the published `v0.1.1` DMG asset and includes the current SHA256.
 
 ## Notes For The Cask
 
@@ -57,6 +64,7 @@ It points at the published `v0.1.0` DMG asset and includes the current SHA256.
 brew uninstall --cask tokenmeter || true
 brew tap lteawoo/tokenmeter
 brew install --cask tokenmeter
+brew upgrade --cask tokenmeter
 ```
 
 ## Open Questions

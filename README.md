@@ -31,6 +31,13 @@ brew tap lteawoo/tokenmeter
 brew install --cask tokenmeter
 ```
 
+To update an existing Homebrew installation:
+
+```bash
+brew update
+brew upgrade --cask tokenmeter
+```
+
 The Homebrew tap lives in `lteawoo/homebrew-tokenmeter`.
 The current cask installs the published Apple Silicon macOS build from GitHub Releases.
 
