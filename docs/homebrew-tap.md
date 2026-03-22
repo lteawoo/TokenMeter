@@ -13,7 +13,8 @@ brew install --cask tokenmeter
 ```
 
 This keeps the app source repository and the Homebrew packaging repository separate.
-The current repository includes a seed cask at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb) that can be copied into the tap repository when it is created.
+The current repository includes a ready-to-publish cask at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
+The tap repository is now published at `lteawoo/homebrew-tokenmeter`.
 
 ## Why A Separate Tap Repo
 
@@ -31,9 +32,10 @@ homebrew-tokenmeter/
   README.md
 ```
 
-## Initial Cask Draft
+## Current Cask
 
-The current draft lives at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
+The current cask lives at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee/projects/TokenMeter/packaging/homebrew/Casks/tokenmeter.rb).
+It points at the published `v0.1.0` DMG asset and includes the current SHA256.
 
 ## Notes For The Cask
 
@@ -46,11 +48,10 @@ The current draft lives at [packaging/homebrew/Casks/tokenmeter.rb](/Users/twlee
 
 ## Release Flow
 
-1. Publish a signed DMG to `lteawoo/TokenMeter` GitHub Releases.
-2. Compute the artifact SHA256.
-3. Update `Casks/tokenmeter.rb` in `lteawoo/homebrew-tokenmeter`.
-4. Commit and push the cask update.
-5. Validate with:
+1. Publish a GitHub Release in `lteawoo/TokenMeter`.
+2. Update `Casks/tokenmeter.rb` in `lteawoo/homebrew-tokenmeter`.
+3. Commit and push the tap repository.
+4. Validate with:
 
 ```bash
 brew uninstall --cask tokenmeter || true
@@ -61,5 +62,4 @@ brew install --cask tokenmeter
 ## Open Questions
 
 - Will the release artifact be universal, arm64-only, or dual-arch
-- What the final bundle identifier will be
 - Whether Homebrew should stay on a custom tap permanently or later target a broader cask submission

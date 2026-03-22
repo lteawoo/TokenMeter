@@ -23,20 +23,29 @@ The compact surface is meant for quick checks. The dashboard is there when you w
 ## Installation
 
 TokenMeter should be installed as a desktop app.
-The preferred install path is Homebrew.
 
 ### Homebrew Tap
-
-Once the tap is published, install TokenMeter like this:
 
 ```bash
 brew tap lteawoo/tokenmeter
 brew install --cask tokenmeter
 ```
 
+The Homebrew tap lives in `lteawoo/homebrew-tokenmeter`.
+The current cask installs the published Apple Silicon macOS build from GitHub Releases.
+
 ### OR GitHub Releases Download
 
-Download the latest signed DMG from GitHub Releases and install TokenMeter directly.
+Download the latest DMG from GitHub Releases and install TokenMeter directly:
+
+```bash
+open https://github.com/lteawoo/TokenMeter/releases/latest
+```
+
+Current release artifact:
+
+- `TokenMeter_0.1.0_aarch64.dmg`
+- Apple Silicon macOS build
 
 ### Build From Source
 
@@ -66,5 +75,5 @@ This starts the local desktop runtime for development.
 
 - TokenMeter is a desktop application, not an externally hosted web app
 - The browser-based UI path exists to support local development and debugging
-- The recommended Homebrew tap repository name is `lteawoo/homebrew-tokenmeter`
+- The Homebrew tap repository is `lteawoo/homebrew-tokenmeter`
 - Release planning and distribution details live in [docs/release-strategy.md](/Users/twlee/projects/TokenMeter/docs/release-strategy.md)
