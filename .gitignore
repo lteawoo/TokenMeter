@@ -6,3 +6,5 @@ apps/**/dist
 packages/**/dist
 __pycache__
 *.pyc
+.codex/
+openspec/
