@@ -2,6 +2,7 @@
   "name": "tokenmeter",
   "private": true,
   "version": "0.1.2",
+  "license": "MIT",
   "packageManager": "pnpm@10.24.0",
   "scripts": {
     "dev": "concurrently -n server,dashboard -c green,blue \"pnpm --filter @tokenmeter/server dev\" \"pnpm --filter @tokenmeter/dashboard dev\"",
