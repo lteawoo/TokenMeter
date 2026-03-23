@@ -218,7 +218,7 @@ describe("App workspace scope selection", () => {
   it("filters dashboard summaries, charts, and session ledger by selected workspace", async () => {
     render(<App />);
 
-    expect(screen.getByText("v0.1.3 · CHECK UPDATES")).toBeInTheDocument();
+    expect(screen.getByText("v0.1.4 · CHECK UPDATES")).toBeInTheDocument();
 
     const memeplateRadio = await screen.findByRole("radio", {
       name: /projects\/memeplate/i,

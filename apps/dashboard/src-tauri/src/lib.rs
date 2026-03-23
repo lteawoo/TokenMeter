@@ -9,7 +9,8 @@ use serde::Serialize;
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Runtime, Size,
+    ActivationPolicy, AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position,
+    Runtime, Size,
     WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
@@ -40,6 +41,20 @@ fn main_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
 fn dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     app.get_webview_window(DASHBOARD_WINDOW_LABEL)
 }
+
+#[cfg(target_os = "macos")]
+fn set_dashboard_activation_policy<R: Runtime>(app: &AppHandle<R>, dashboard_open: bool) {
+    let policy = if dashboard_open {
+        ActivationPolicy::Regular
+    } else {
+        ActivationPolicy::Accessory
+    };
+    let _ = app.set_activation_policy(policy);
+    let _ = app.set_dock_visibility(dashboard_open);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dashboard_activation_policy<R: Runtime>(_app: &AppHandle<R>, _dashboard_open: bool) {}
 
 fn configure_main_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = main_window(app) else {
@@ -74,6 +89,8 @@ pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_setting
     } else {
         "index.html?view=dashboard"
     };
+
+    set_dashboard_activation_policy(app, true);
 
     if let Some(window) = dashboard_window(app) {
         if let Ok(mut url) = window.url() {
@@ -288,6 +305,14 @@ pub fn run() {
             (DASHBOARD_WINDOW_LABEL, WindowEvent::Focused(focused)) => {
                 emit_window_visibility(window.app_handle(), "dashboard", *focused);
             }
+            (DASHBOARD_WINDOW_LABEL, WindowEvent::Destroyed) => {
+                emit_window_visibility(window.app_handle(), "dashboard", false);
+                set_dashboard_activation_policy(window.app_handle(), false);
+            }
+            (DASHBOARD_WINDOW_LABEL, WindowEvent::CloseRequested { .. }) => {
+                emit_window_visibility(window.app_handle(), "dashboard", false);
+                set_dashboard_activation_policy(window.app_handle(), false);
+            }
             _ => {}
         })
         .setup(|app| {
@@ -299,6 +324,7 @@ pub fn run() {
                 )?;
             }
 
+            set_dashboard_activation_policy(app.handle(), false);
             configure_main_window(&app.handle());
             build_tray(&app.handle())?;
             start_tray_refresh_loop(app.handle().clone());
