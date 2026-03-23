@@ -789,7 +789,8 @@ pub fn get_codex_overview<R: Runtime>(
 mod tests {
     use super::{
         cached_summary_for_snapshot, enrich_session_summary, format_tray_status,
-        load_session_file_index, load_session_summary_cache, new_session_file_index, new_session_summary_cache,
+        get_codex_overview_from_sessions_dir, load_session_file_index, load_session_summary_cache,
+        modified_unix_ms, new_session_file_index, new_session_summary_cache,
         recursive_session_tree_inventory, retained_cache_entries, save_session_file_index,
         save_session_summary_cache, session_file_index_from_inventory, session_file_index_is_valid,
         session_file_snapshots_from_index, CachedSessionSummary, CodexOverview,
@@ -803,7 +804,7 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
-    use chrono::{SecondsFormat, Utc};
+    use chrono::{Duration, SecondsFormat, Utc};
 
     fn stored_session_with_rates(
         primary_used_percent: f64,
@@ -1020,12 +1021,84 @@ mod tests {
     fn runtime_enrichment_marks_fifteen_minute_boundary_idle() {
         let now = Utc::now();
         let boundary = StoredSessionSummary {
-            updated_at: (now - chrono::Duration::minutes(15))
+            updated_at: (now - Duration::minutes(15))
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
             ..stored_session_with_rates(10.0, 20.0)
         };
 
         assert_eq!(enrich_session_summary(boundary, now).status, "idle");
+    }
+
+    #[test]
+    fn overview_recomputes_cached_session_status_on_cache_hit() {
+        let temp_dir = unique_temp_dir("session-cache-status-refresh");
+        let sessions_dir = temp_dir.join("sessions");
+        let cache_path = temp_dir.join("cache.json");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+
+        let session_path = sessions_dir.join("session-1.jsonl");
+        fs::write(&session_path, "{\"type\":\"noop\"}\n").expect("session file should exist");
+        let metadata = fs::metadata(&session_path).expect("metadata should load");
+        let modified_unix_ms = modified_unix_ms(&metadata).expect("modified time should exist");
+
+        let mut cache = new_session_summary_cache(&sessions_dir);
+        cache.entries.push(CachedSessionSummary {
+            path: session_path.display().to_string(),
+            modified_unix_ms,
+            size_bytes: metadata.len(),
+            summary: StoredSessionSummary {
+                file_path: session_path.display().to_string(),
+                file_name: "session-1.jsonl".into(),
+                updated_at: (Utc::now() - Duration::minutes(20))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                ..stored_session_with_rates(10.0, 20.0)
+            },
+        });
+        save_session_summary_cache(&cache_path, &cache).expect("cache should save");
+
+        let overview = get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
+            .expect("overview should load from cache");
+
+        assert_eq!(overview.sessions.len(), 1);
+        assert_eq!(overview.sessions[0].status, "idle");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn overview_keeps_recent_cached_session_active_on_cache_hit() {
+        let temp_dir = unique_temp_dir("session-cache-status-active");
+        let sessions_dir = temp_dir.join("sessions");
+        let cache_path = temp_dir.join("cache.json");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+
+        let session_path = sessions_dir.join("session-1.jsonl");
+        fs::write(&session_path, "{\"type\":\"noop\"}\n").expect("session file should exist");
+        let metadata = fs::metadata(&session_path).expect("metadata should load");
+        let modified_unix_ms = modified_unix_ms(&metadata).expect("modified time should exist");
+
+        let mut cache = new_session_summary_cache(&sessions_dir);
+        cache.entries.push(CachedSessionSummary {
+            path: session_path.display().to_string(),
+            modified_unix_ms,
+            size_bytes: metadata.len(),
+            summary: StoredSessionSummary {
+                file_path: session_path.display().to_string(),
+                file_name: "session-1.jsonl".into(),
+                updated_at: (Utc::now() - Duration::minutes(5))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+                ..stored_session_with_rates(10.0, 20.0)
+            },
+        });
+        save_session_summary_cache(&cache_path, &cache).expect("cache should save");
+
+        let overview = get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
+            .expect("overview should load from cache");
+
+        assert_eq!(overview.sessions.len(), 1);
+        assert_eq!(overview.sessions[0].status, "active");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
     #[test]
