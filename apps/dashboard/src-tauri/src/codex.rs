@@ -197,11 +197,11 @@ fn save_session_summary_cache(path: &Path, cache: &SessionSummaryCache) -> Resul
     fs::write(path, payload).map_err(|error| error.to_string())
 }
 
-fn session_status_from_updated_at(updated_at: &str) -> String {
+fn session_status_from_updated_at(updated_at: &str, now: DateTime<Utc>) -> String {
     let updated = DateTime::parse_from_rfc3339(updated_at)
         .map(|value| value.with_timezone(&Utc))
         .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::UNIX_EPOCH));
-    let is_active = Utc::now().signed_duration_since(updated).num_minutes() < 15;
+    let is_active = now.signed_duration_since(updated).num_minutes() < 15;
 
     if is_active {
         "active".into()
@@ -338,8 +338,8 @@ fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
     }
 }
 
-fn enrich_session_summary(summary: StoredSessionSummary) -> CodexSessionSummary {
-    let status = session_status_from_updated_at(&summary.updated_at);
+fn enrich_session_summary(summary: StoredSessionSummary, now: DateTime<Utc>) -> CodexSessionSummary {
+    let status = session_status_from_updated_at(&summary.updated_at, now);
 
     CodexSessionSummary {
         id: summary.id,
@@ -467,7 +467,8 @@ fn get_codex_overview_from_sessions_dir(
     cache_path: Option<&Path>,
     limit: usize,
 ) -> Result<CodexOverview, String> {
-    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = Utc::now();
+    let generated_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if !sessions_dir.is_dir() {
         return Ok(empty_overview(sessions_dir, generated_at));
@@ -497,7 +498,7 @@ fn get_codex_overview_from_sessions_dir(
         let path_key = snapshot_path_key(snapshot);
 
         if let Some(summary) = cached_summary_for_snapshot(&entries_by_path, snapshot) {
-            sessions.push(enrich_session_summary(summary));
+            sessions.push(enrich_session_summary(summary, now));
             continue;
         }
 
@@ -512,7 +513,7 @@ fn get_codex_overview_from_sessions_dir(
                         summary: stored_summary.clone(),
                     },
                 );
-                sessions.push(enrich_session_summary(stored_summary));
+                sessions.push(enrich_session_summary(stored_summary, now));
             }
             Err(error) => {
                 entries_by_path.remove(&path_key);
@@ -620,7 +621,7 @@ mod tests {
         enrich_session_summary(stored_session_with_rates(
             primary_used_percent,
             secondary_used_percent,
-        ))
+        ), Utc::now())
     }
 
     fn overview_with_session(session: CodexSessionSummary) -> CodexOverview {
@@ -767,8 +768,9 @@ mod tests {
 
     #[test]
     fn runtime_enrichment_recomputes_freshness_from_updated_at() {
+        let now = Utc::now();
         let recent = StoredSessionSummary {
-            updated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             ..stored_session_with_rates(10.0, 20.0)
         };
         let stale = StoredSessionSummary {
@@ -776,7 +778,19 @@ mod tests {
             ..stored_session_with_rates(10.0, 20.0)
         };
 
-        assert_eq!(enrich_session_summary(recent).status, "active");
-        assert_eq!(enrich_session_summary(stale).status, "idle");
+        assert_eq!(enrich_session_summary(recent, now).status, "active");
+        assert_eq!(enrich_session_summary(stale, now).status, "idle");
+    }
+
+    #[test]
+    fn runtime_enrichment_marks_fifteen_minute_boundary_idle() {
+        let now = Utc::now();
+        let boundary = StoredSessionSummary {
+            updated_at: (now - chrono::Duration::minutes(15))
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            ..stored_session_with_rates(10.0, 20.0)
+        };
+
+        assert_eq!(enrich_session_summary(boundary, now).status, "idle");
     }
 }
