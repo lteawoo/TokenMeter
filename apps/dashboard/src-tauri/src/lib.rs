@@ -83,6 +83,24 @@ fn emit_window_visibility<R: Runtime>(app: &AppHandle<R>, view: &'static str, vi
     );
 }
 
+fn effective_window_visibility(is_visible: bool, is_minimized: bool) -> bool {
+    is_visible && !is_minimized
+}
+
+fn actual_window_visibility<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    let is_visible = window.is_visible().unwrap_or(false);
+    let is_minimized = window.is_minimized().unwrap_or(false);
+    effective_window_visibility(is_visible, is_minimized)
+}
+
+fn dashboard_visibility_for_event(event: &WindowEvent, actual_visibility: bool) -> Option<bool> {
+    match event {
+        WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => Some(false),
+        WindowEvent::Focused(_) => Some(actual_visibility),
+        _ => None,
+    }
+}
+
 pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_settings: bool) {
     let target_url = if open_settings {
         "index.html?view=dashboard&settings=1"
@@ -110,7 +128,7 @@ pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_setting
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
-        emit_window_visibility(app, "dashboard", true);
+        emit_window_visibility(app, "dashboard", actual_window_visibility(&window));
         return;
     }
 
@@ -130,7 +148,7 @@ pub(crate) fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>, open_setting
 
     let _ = window.show();
     let _ = window.set_focus();
-    emit_window_visibility(app, "dashboard", true);
+    emit_window_visibility(app, "dashboard", actual_window_visibility(&window));
 }
 
 fn toggle_or_show_main_window_at_tray<R: Runtime>(
@@ -302,16 +320,17 @@ pub fn run() {
             (MAIN_WINDOW_LABEL, WindowEvent::Focused(true)) => {
                 emit_window_visibility(window.app_handle(), "panel", true);
             }
-            (DASHBOARD_WINDOW_LABEL, WindowEvent::Focused(focused)) => {
-                emit_window_visibility(window.app_handle(), "dashboard", *focused);
-            }
-            (DASHBOARD_WINDOW_LABEL, WindowEvent::Destroyed) => {
-                emit_window_visibility(window.app_handle(), "dashboard", false);
-                set_dashboard_activation_policy(window.app_handle(), false);
-            }
-            (DASHBOARD_WINDOW_LABEL, WindowEvent::CloseRequested { .. }) => {
-                emit_window_visibility(window.app_handle(), "dashboard", false);
-                set_dashboard_activation_policy(window.app_handle(), false);
+            (DASHBOARD_WINDOW_LABEL, event) => {
+                let actual_visibility = effective_window_visibility(
+                    window.is_visible().unwrap_or(false),
+                    window.is_minimized().unwrap_or(false),
+                );
+                if let Some(visible) = dashboard_visibility_for_event(event, actual_visibility) {
+                    emit_window_visibility(window.app_handle(), "dashboard", visible);
+                    if !visible {
+                        set_dashboard_activation_policy(window.app_handle(), false);
+                    }
+                }
             }
             _ => {}
         })
@@ -350,10 +369,44 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::TRAY_REFRESH_INTERVAL_SECS;
+    use super::{
+        dashboard_visibility_for_event, effective_window_visibility, TRAY_REFRESH_INTERVAL_SECS,
+    };
+    use tauri::WindowEvent;
 
     #[test]
     fn tray_refresh_interval_is_five_seconds() {
         assert_eq!(TRAY_REFRESH_INTERVAL_SECS, 5);
+    }
+
+    #[test]
+    fn dashboard_focus_changes_do_not_change_visibility() {
+        assert_eq!(
+            dashboard_visibility_for_event(&WindowEvent::Focused(false), true),
+            Some(true)
+        );
+        assert_eq!(
+            dashboard_visibility_for_event(&WindowEvent::Focused(true), true),
+            Some(true)
+        );
+        assert_eq!(
+            dashboard_visibility_for_event(&WindowEvent::Focused(false), false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn dashboard_destroyed_window_becomes_hidden() {
+        assert_eq!(
+            dashboard_visibility_for_event(&WindowEvent::Destroyed, true),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn effective_window_visibility_treats_minimized_windows_as_hidden() {
+        assert!(effective_window_visibility(true, false));
+        assert!(!effective_window_visibility(true, true));
+        assert!(!effective_window_visibility(false, false));
     }
 }

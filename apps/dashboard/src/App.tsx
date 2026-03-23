@@ -483,10 +483,12 @@ function App() {
   const [windowVisible, setWindowVisible] = useState(() =>
     isDesktop ? true : isDocumentVisible(),
   );
+  const [documentVisible, setDocumentVisible] = useState(() => isDocumentVisible());
   const overviewRef = useRef<CodexOverview | null>(null);
   const requestInFlightRef = useRef(false);
   const settingsRef = useRef<AppSettings>(DEFAULT_APP_SETTINGS);
   const manualRefreshTimerRef = useRef<number | null>(null);
+  const surfaceVisible = isDesktop ? windowVisible && documentVisible : documentVisible;
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -534,47 +536,51 @@ function App() {
   }, [settings.themeMode]);
 
   useEffect(() => {
-    if (isDesktop) {
-      let cancelled = false;
-      let detach: (() => void) | undefined;
-
-      void getDesktopWindowVisibility().then((visible) => {
-        if (!cancelled) {
-          setWindowVisible(visible);
-        }
-      });
-
-      void listenForDesktopWindowVisibility(desktopWindowView, (visible) => {
-        if (!cancelled) {
-          setWindowVisible(visible);
-        }
-      }).then((unlisten) => {
-        if (cancelled) {
-          unlisten();
-          return;
-        }
-
-        detach = unlisten;
-      });
-
-      return () => {
-        cancelled = true;
-        detach?.();
-      };
-    }
-
     if (typeof document === "undefined") {
       return;
     }
 
     const handleVisibilityChange = () => {
-      setWindowVisible(isDocumentVisible());
+      setDocumentVisible(isDocumentVisible());
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktop) {
+      return;
+    }
+
+    let cancelled = false;
+    let detach: (() => void) | undefined;
+
+    void getDesktopWindowVisibility().then((visible) => {
+      if (!cancelled) {
+        setWindowVisible(visible);
+      }
+    });
+
+    void listenForDesktopWindowVisibility(desktopWindowView, (visible) => {
+      if (!cancelled) {
+        setWindowVisible(visible);
+      }
+    }).then((unlisten) => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+
+      detach = unlisten;
+    });
+
+    return () => {
+      cancelled = true;
+      detach?.();
     };
   }, [desktopWindowView, isDesktop]);
 
@@ -746,7 +752,7 @@ function App() {
   }, [isDesktop]);
 
   useEffect(() => {
-    if (!isDesktop || !windowVisible) {
+    if (!isDesktop || !surfaceVisible) {
       return;
     }
 
@@ -757,7 +763,7 @@ function App() {
       .catch(() => {
         // Keep the current update state if the auto-check fails to start.
       });
-  }, [isDesktop, windowVisible]);
+  }, [isDesktop, surfaceVisible]);
 
   useEffect(() => {
     if (isDesktopPanel || !openSettingsFromQuery) {
@@ -774,7 +780,7 @@ function App() {
   }, [isDesktopPanel, openSettingsFromQuery]);
 
   useEffect(() => {
-    if (!settingsLoaded || !windowVisible) {
+    if (!settingsLoaded || !surfaceVisible) {
       return;
     }
 
@@ -783,15 +789,13 @@ function App() {
       ? PANEL_REFRESH_INTERVAL_MS
       : DASHBOARD_REFRESH_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      if (isDocumentVisible()) {
-        void loadOverview();
-      }
+      void loadOverview();
     }, refreshIntervalMs);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [isDesktopPanel, loadOverview, settingsLoaded, windowVisible]);
+  }, [isDesktopPanel, loadOverview, settingsLoaded, surfaceVisible]);
 
   const handleSaveSettings = useCallback(
     async (nextSettings: AppSettings) => {

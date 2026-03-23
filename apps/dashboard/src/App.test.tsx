@@ -417,37 +417,37 @@ describe("App workspace scope selection", () => {
 
   it("polls the desktop dashboard only while desktop visibility is true", async () => {
     getRuntimeKindMock.mockReturnValue("desktop");
-
-    const setIntervalSpy = vi.spyOn(window, "setInterval");
-    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
+    vi.useFakeTimers();
 
     try {
       render(<App />);
 
-      await waitFor(() => {
-        expect(getCodexOverviewMock).toHaveBeenCalledTimes(1);
-      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(1);
 
-      await waitFor(() => {
-        expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), 15_000);
-      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(2);
 
-      const intervalHandle = setIntervalSpy.mock.results.at(-1)?.value;
+      setDocumentVisibilityState("hidden");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(2);
+
+      setDocumentVisibilityState("visible");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(3);
 
       emitDesktopWindowVisibility(false);
-
-      await waitFor(() => {
-        expect(clearIntervalSpy).toHaveBeenCalledWith(intervalHandle);
-      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(3);
 
       emitDesktopWindowVisibility(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(4);
 
-      await waitFor(() => {
-        expect(setIntervalSpy).toHaveBeenLastCalledWith(expect.any(Function), 15_000);
-      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(getCodexOverviewMock).toHaveBeenCalledTimes(5);
     } finally {
-      setIntervalSpy.mockRestore();
-      clearIntervalSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 
