@@ -19,7 +19,7 @@ const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 25;
 const SESSION_FILE_INDEX_FILE_NAME: &str = "codex-session-file-index.json";
 const SESSION_SUMMARY_CACHE_FILE_NAME: &str = "codex-session-summary-cache.json";
-const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 2;
 const SESSION_FILE_INDEX_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,6 +59,22 @@ pub struct CodexSessionSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StoredSessionSummary {
+    id: String,
+    file_path: String,
+    file_name: String,
+    model: Option<String>,
+    effort: Option<String>,
+    cwd: Option<String>,
+    updated_at: String,
+    total_usage: Option<UsageTotals>,
+    last_usage: Option<UsageTotals>,
+    primary_rate_limit: Option<RateLimitSnapshot>,
+    secondary_rate_limit: Option<RateLimitSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexOverview {
     provider: String,
     generated_at: String,
@@ -74,7 +90,7 @@ struct CachedSessionSummary {
     path: String,
     modified_unix_ms: u64,
     size_bytes: u64,
-    summary: CodexSessionSummary,
+    summary: StoredSessionSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,13 +121,7 @@ struct SessionFileSnapshot {
     size_bytes: u64,
 }
 
-#[derive(Debug, Clone)]
-struct SessionTreeInventory {
-    directories: Vec<TrackedDirectorySnapshot>,
-    files: Vec<SessionFileSnapshot>,
-}
-
-impl CodexSessionSummary {
+impl StoredSessionSummary {
     fn empty(file_path: &Path) -> Self {
         let file_name = file_path
             .file_name()
@@ -132,9 +142,14 @@ impl CodexSessionSummary {
             last_usage: None,
             primary_rate_limit: None,
             secondary_rate_limit: None,
-            status: "idle".into(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct SessionTreeInventory {
+    directories: Vec<TrackedDirectorySnapshot>,
+    files: Vec<SessionFileSnapshot>,
 }
 
 fn default_codex_sessions_dir() -> Result<PathBuf, String> {
@@ -250,6 +265,19 @@ fn save_session_summary_cache(path: &Path, cache: &SessionSummaryCache) -> Resul
 
     let payload = serde_json::to_string_pretty(cache).map_err(|error| error.to_string())?;
     fs::write(path, payload).map_err(|error| error.to_string())
+}
+
+fn session_status_from_updated_at(updated_at: &str, now: DateTime<Utc>) -> String {
+    let updated = DateTime::parse_from_rfc3339(updated_at)
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::UNIX_EPOCH));
+    let is_active = now.signed_duration_since(updated).num_minutes() < 15;
+
+    if is_active {
+        "active".into()
+    } else {
+        "idle".into()
+    }
 }
 
 fn save_session_file_index(path: &Path, index: &SessionFileIndex) -> Result<(), String> {
@@ -411,8 +439,27 @@ fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
     }
 }
 
-fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
-    let mut summary = CodexSessionSummary::empty(path);
+fn enrich_session_summary(summary: StoredSessionSummary, now: DateTime<Utc>) -> CodexSessionSummary {
+    let status = session_status_from_updated_at(&summary.updated_at, now);
+
+    CodexSessionSummary {
+        id: summary.id,
+        file_path: summary.file_path,
+        file_name: summary.file_name,
+        model: summary.model,
+        effort: summary.effort,
+        cwd: summary.cwd,
+        updated_at: summary.updated_at,
+        total_usage: summary.total_usage,
+        last_usage: summary.last_usage,
+        primary_rate_limit: summary.primary_rate_limit,
+        secondary_rate_limit: summary.secondary_rate_limit,
+        status,
+    }
+}
+
+fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
+    let mut summary = StoredSessionSummary::empty(path);
     let file = File::open(path).map_err(|err| err.to_string())?;
     let reader = BufReader::new(file);
 
@@ -470,12 +517,6 @@ fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
         summary.updated_at =
             DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true);
     }
-
-    let updated = DateTime::parse_from_rfc3339(&summary.updated_at)
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(|_| DateTime::<Utc>::from(std::time::UNIX_EPOCH));
-    let is_active = Utc::now().signed_duration_since(updated).num_minutes() < 15;
-    summary.status = if is_active { "active" } else { "idle" }.into();
 
     Ok(summary)
 }
@@ -566,7 +607,7 @@ fn cache_entry_matches(entry: &CachedSessionSummary, snapshot: &SessionFileSnaps
 fn cached_summary_for_snapshot(
     entries_by_path: &HashMap<String, CachedSessionSummary>,
     snapshot: &SessionFileSnapshot,
-) -> Option<CodexSessionSummary> {
+) -> Option<StoredSessionSummary> {
     let path_key = snapshot_path_key(snapshot);
     entries_by_path
         .get(&path_key)
@@ -603,7 +644,8 @@ fn get_codex_overview_from_sessions_dir(
     file_index_path: Option<&Path>,
     limit: usize,
 ) -> Result<CodexOverview, String> {
-    let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let now = Utc::now();
+    let generated_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if !sessions_dir.is_dir() {
         return Ok(empty_overview(sessions_dir, generated_at));
@@ -657,22 +699,22 @@ fn get_codex_overview_from_sessions_dir(
         let path_key = snapshot_path_key(snapshot);
 
         if let Some(summary) = cached_summary_for_snapshot(&entries_by_path, snapshot) {
-            sessions.push(summary);
+            sessions.push(enrich_session_summary(summary, now));
             continue;
         }
 
         match parse_session_file(&snapshot.path) {
-            Ok(summary) => {
+            Ok(stored_summary) => {
                 entries_by_path.insert(
                     path_key.clone(),
                     CachedSessionSummary {
                         path: path_key,
                         modified_unix_ms: snapshot.modified_unix_ms,
                         size_bytes: snapshot.size_bytes,
-                        summary: summary.clone(),
+                        summary: stored_summary.clone(),
                     },
                 );
-                sessions.push(summary);
+                sessions.push(enrich_session_summary(stored_summary, now));
             }
             Err(error) => {
                 entries_by_path.remove(&path_key);
@@ -746,12 +788,12 @@ pub fn get_codex_overview<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        cached_summary_for_snapshot, format_tray_status, load_session_file_index,
-        load_session_summary_cache, new_session_file_index, new_session_summary_cache,
+        cached_summary_for_snapshot, enrich_session_summary, format_tray_status,
+        load_session_file_index, load_session_summary_cache, new_session_file_index, new_session_summary_cache,
         recursive_session_tree_inventory, retained_cache_entries, save_session_file_index,
         save_session_summary_cache, session_file_index_from_inventory, session_file_index_is_valid,
         session_file_snapshots_from_index, CachedSessionSummary, CodexOverview,
-        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, UsageTotals,
+        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, StoredSessionSummary, UsageTotals,
         SESSION_FILE_INDEX_VERSION, SESSION_SUMMARY_CACHE_VERSION,
     };
     use crate::settings;
@@ -761,12 +803,13 @@ mod tests {
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
+    use chrono::{SecondsFormat, Utc};
 
-    fn session_with_rates(
+    fn stored_session_with_rates(
         primary_used_percent: f64,
         secondary_used_percent: f64,
-    ) -> CodexSessionSummary {
-        CodexSessionSummary {
+    ) -> StoredSessionSummary {
+        StoredSessionSummary {
             id: "session-1".into(),
             file_path: "/tmp/session-1.jsonl".into(),
             file_name: "session-1.jsonl".into(),
@@ -786,8 +829,14 @@ mod tests {
                 window_minutes: Some(10_080),
                 resets_at: None,
             }),
-            status: "active".into(),
         }
+    }
+
+    fn session_with_rates(primary_used_percent: f64, secondary_used_percent: f64) -> CodexSessionSummary {
+        enrich_session_summary(stored_session_with_rates(
+            primary_used_percent,
+            secondary_used_percent,
+        ), Utc::now())
     }
 
     fn overview_with_session(session: CodexSessionSummary) -> CodexOverview {
@@ -832,7 +881,7 @@ mod tests {
             path: path.to_string(),
             modified_unix_ms,
             size_bytes,
-            summary: session_with_rates(10.0, 20.0),
+            summary: stored_session_with_rates(10.0, 20.0),
         }
     }
 
@@ -939,14 +988,44 @@ mod tests {
         let mut cache = new_session_summary_cache(&sessions_dir);
         cache.entries.push(cache_entry("/tmp/session-1.jsonl", 100, 200));
         save_session_summary_cache(&cache_path, &cache).expect("cache should save");
+        let payload = fs::read_to_string(&cache_path).expect("cache should read");
 
         let loaded = load_session_summary_cache(&cache_path, &sessions_dir);
 
+        assert!(!payload.contains("\"status\""));
         assert_eq!(loaded.version, SESSION_SUMMARY_CACHE_VERSION);
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].path, "/tmp/session-1.jsonl");
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn runtime_enrichment_recomputes_freshness_from_updated_at() {
+        let now = Utc::now();
+        let recent = StoredSessionSummary {
+            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            ..stored_session_with_rates(10.0, 20.0)
+        };
+        let stale = StoredSessionSummary {
+            updated_at: "2026-03-01T00:00:00.000Z".into(),
+            ..stored_session_with_rates(10.0, 20.0)
+        };
+
+        assert_eq!(enrich_session_summary(recent, now).status, "active");
+        assert_eq!(enrich_session_summary(stale, now).status, "idle");
+    }
+
+    #[test]
+    fn runtime_enrichment_marks_fifteen_minute_boundary_idle() {
+        let now = Utc::now();
+        let boundary = StoredSessionSummary {
+            updated_at: (now - chrono::Duration::minutes(15))
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            ..stored_session_with_rates(10.0, 20.0)
+        };
+
+        assert_eq!(enrich_session_summary(boundary, now).status, "idle");
     }
 
     #[test]
