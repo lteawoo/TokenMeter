@@ -1,22 +1,26 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     fs::{self, DirEntry, File},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::settings;
 
 const DEFAULT_LIMIT: usize = 12;
 const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 25;
+const SESSION_SUMMARY_CACHE_FILE_NAME: &str = "codex-session-summary-cache.json";
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageTotals {
     input_tokens: u64,
@@ -26,7 +30,7 @@ pub struct UsageTotals {
     total_tokens: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitSnapshot {
     used_percent: f64,
@@ -34,7 +38,7 @@ pub struct RateLimitSnapshot {
     resets_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexSessionSummary {
     id: String,
@@ -51,7 +55,7 @@ pub struct CodexSessionSummary {
     status: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexOverview {
     provider: String,
@@ -61,6 +65,28 @@ pub struct CodexOverview {
     sessions: Vec<CodexSessionSummary>,
     totals: UsageTotals,
     last_turn_totals: UsageTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedSessionSummary {
+    path: String,
+    modified_unix_ms: u64,
+    size_bytes: u64,
+    summary: CodexSessionSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionSummaryCache {
+    version: u32,
+    sessions_dir: String,
+    entries: Vec<CachedSessionSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionFileSnapshot {
+    path: PathBuf,
+    modified_unix_ms: u64,
+    size_bytes: u64,
 }
 
 impl CodexSessionSummary {
@@ -101,6 +127,61 @@ fn codex_sessions_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String>
     )))
 }
 
+fn session_summary_cache_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .or_else(|_| app.path().app_config_dir())
+        .map(|dir| dir.join(SESSION_SUMMARY_CACHE_FILE_NAME))
+        .map_err(|error| error.to_string())
+}
+
+fn new_session_summary_cache(sessions_dir: &Path) -> SessionSummaryCache {
+    SessionSummaryCache {
+        version: SESSION_SUMMARY_CACHE_VERSION,
+        sessions_dir: sessions_dir.display().to_string(),
+        entries: Vec::new(),
+    }
+}
+
+fn load_session_summary_cache(path: &Path, sessions_dir: &Path) -> SessionSummaryCache {
+    if !path.exists() {
+        return new_session_summary_cache(sessions_dir);
+    }
+
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            log::warn!("failed to read session summary cache: {error}");
+            return new_session_summary_cache(sessions_dir);
+        }
+    };
+
+    let cache = match serde_json::from_str::<SessionSummaryCache>(&contents) {
+        Ok(cache) => cache,
+        Err(error) => {
+            log::warn!("failed to decode session summary cache: {error}");
+            return new_session_summary_cache(sessions_dir);
+        }
+    };
+
+    if cache.version != SESSION_SUMMARY_CACHE_VERSION
+        || cache.sessions_dir != sessions_dir.display().to_string()
+    {
+        return new_session_summary_cache(sessions_dir);
+    }
+
+    cache
+}
+
+fn save_session_summary_cache(path: &Path, cache: &SessionSummaryCache) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let payload = serde_json::to_string_pretty(cache).map_err(|error| error.to_string())?;
+    fs::write(path, payload).map_err(|error| error.to_string())
+}
+
 pub fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(MIN_LIMIT, MAX_LIMIT)
 }
@@ -138,7 +219,18 @@ pub fn format_tray_status(
     }
 }
 
-fn recursive_jsonl_files(dir: &Path) -> Vec<PathBuf> {
+fn modified_unix_ms(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
+fn recursive_jsonl_file_snapshots(dir: &Path) -> Vec<SessionFileSnapshot> {
     let mut files = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -153,13 +245,24 @@ fn recursive_jsonl_files(dir: &Path) -> Vec<PathBuf> {
         let path = entry.path();
 
         if path.is_dir() {
-            files.extend(recursive_jsonl_files(&path));
+            files.extend(recursive_jsonl_file_snapshots(&path));
         } else if path
             .extension()
             .and_then(|value| value.to_str())
             .is_some_and(|value| value == "jsonl")
         {
-            files.push(path);
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            let Some(modified_unix_ms) = modified_unix_ms(&metadata) else {
+                continue;
+            };
+
+            files.push(SessionFileSnapshot {
+                path,
+                modified_unix_ms,
+                size_bytes: metadata.len(),
+            });
         }
     }
 
@@ -276,40 +379,110 @@ fn parse_session_file(path: &Path) -> Result<CodexSessionSummary, String> {
     Ok(summary)
 }
 
-pub fn get_codex_overview<R: Runtime>(
-    app: &AppHandle<R>,
+fn snapshot_path_key(snapshot: &SessionFileSnapshot) -> String {
+    snapshot.path.display().to_string()
+}
+
+fn cache_entry_matches(entry: &CachedSessionSummary, snapshot: &SessionFileSnapshot) -> bool {
+    entry.modified_unix_ms == snapshot.modified_unix_ms && entry.size_bytes == snapshot.size_bytes
+}
+
+fn cached_summary_for_snapshot(
+    entries_by_path: &HashMap<String, CachedSessionSummary>,
+    snapshot: &SessionFileSnapshot,
+) -> Option<CodexSessionSummary> {
+    let path_key = snapshot_path_key(snapshot);
+    entries_by_path
+        .get(&path_key)
+        .filter(|entry| cache_entry_matches(entry, snapshot))
+        .map(|entry| entry.summary.clone())
+}
+
+fn retained_cache_entries(
+    entries: Vec<CachedSessionSummary>,
+    discovered_paths: &HashSet<String>,
+) -> HashMap<String, CachedSessionSummary> {
+    entries
+        .into_iter()
+        .filter(|entry| discovered_paths.contains(&entry.path))
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<HashMap<_, _>>()
+}
+
+fn empty_overview(sessions_dir: &Path, generated_at: String) -> CodexOverview {
+    CodexOverview {
+        provider: "codex".into(),
+        generated_at,
+        sessions_dir: sessions_dir.display().to_string(),
+        latest_session: None,
+        sessions: Vec::new(),
+        totals: UsageTotals::default(),
+        last_turn_totals: UsageTotals::default(),
+    }
+}
+
+fn get_codex_overview_from_sessions_dir(
+    sessions_dir: &Path,
+    cache_path: Option<&Path>,
     limit: usize,
 ) -> Result<CodexOverview, String> {
-    let sessions_dir = codex_sessions_dir(app).or_else(|_| default_codex_sessions_dir())?;
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     if !sessions_dir.is_dir() {
-        return Ok(CodexOverview {
-            provider: "codex".into(),
-            generated_at,
-            sessions_dir: sessions_dir.display().to_string(),
-            latest_session: None,
-            sessions: Vec::new(),
-            totals: UsageTotals::default(),
-            last_turn_totals: UsageTotals::default(),
-        });
+        return Ok(empty_overview(sessions_dir, generated_at));
     }
 
-    let mut files_with_meta = recursive_jsonl_files(&sessions_dir)
-        .into_iter()
-        .filter_map(|path| {
-            let modified = fs::metadata(&path).ok()?.modified().ok()?;
-            Some((path, modified))
-        })
-        .collect::<Vec<_>>();
+    let mut snapshots = recursive_jsonl_file_snapshots(sessions_dir);
+    snapshots.sort_by(|left, right| right.modified_unix_ms.cmp(&left.modified_unix_ms));
 
-    files_with_meta.sort_by(|left, right| right.1.cmp(&left.1));
+    let discovered_paths = snapshots
+        .iter()
+        .map(snapshot_path_key)
+        .collect::<HashSet<_>>();
 
-    let mut sessions = files_with_meta
-        .into_iter()
-        .take(limit)
-        .filter_map(|(path, _)| parse_session_file(&path).ok())
+    let mut cache = cache_path
+        .map(|path| load_session_summary_cache(path, sessions_dir))
+        .unwrap_or_else(|| new_session_summary_cache(sessions_dir));
+
+    let entries_by_path = cache
+        .entries
+        .drain(..)
         .collect::<Vec<_>>();
+    let mut entries_by_path = retained_cache_entries(entries_by_path, &discovered_paths);
+
+    let mut sessions = Vec::new();
+
+    for snapshot in snapshots.iter().take(limit) {
+        let path_key = snapshot_path_key(snapshot);
+
+        if let Some(summary) = cached_summary_for_snapshot(&entries_by_path, snapshot) {
+            sessions.push(summary);
+            continue;
+        }
+
+        match parse_session_file(&snapshot.path) {
+            Ok(summary) => {
+                entries_by_path.insert(
+                    path_key.clone(),
+                    CachedSessionSummary {
+                        path: path_key,
+                        modified_unix_ms: snapshot.modified_unix_ms,
+                        size_bytes: snapshot.size_bytes,
+                        summary: summary.clone(),
+                    },
+                );
+                sessions.push(summary);
+            }
+            Err(error) => {
+                entries_by_path.remove(&path_key);
+                log::warn!(
+                    "failed to parse session file for overview cache refresh ({}): {}",
+                    snapshot.path.display(),
+                    error
+                );
+            }
+        }
+    }
 
     sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
@@ -319,6 +492,15 @@ pub fn get_codex_overview<R: Runtime>(
     for session in &sessions {
         add_usage(&mut totals, &session.total_usage);
         add_usage(&mut last_turn_totals, &session.last_usage);
+    }
+
+    if let Some(path) = cache_path {
+        cache.entries = entries_by_path.into_values().collect();
+        cache.entries.sort_by(|left, right| left.path.cmp(&right.path));
+
+        if let Err(error) = save_session_summary_cache(path, &cache) {
+            log::warn!("failed to persist session summary cache: {error}");
+        }
     }
 
     Ok(CodexOverview {
@@ -332,12 +514,37 @@ pub fn get_codex_overview<R: Runtime>(
     })
 }
 
+pub fn get_codex_overview<R: Runtime>(
+    app: &AppHandle<R>,
+    limit: usize,
+) -> Result<CodexOverview, String> {
+    let sessions_dir = codex_sessions_dir(app).or_else(|_| default_codex_sessions_dir())?;
+    let cache_path = match session_summary_cache_path(app) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            log::warn!("failed to resolve session summary cache path: {error}");
+            None
+        }
+    };
+
+    get_codex_overview_from_sessions_dir(&sessions_dir, cache_path.as_deref(), limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        format_tray_status, CodexOverview, CodexSessionSummary, RateLimitSnapshot, UsageTotals,
+        cached_summary_for_snapshot, format_tray_status, load_session_summary_cache,
+        new_session_summary_cache, retained_cache_entries, save_session_summary_cache,
+        CachedSessionSummary, CodexOverview, CodexSessionSummary, RateLimitSnapshot,
+        SessionFileSnapshot, UsageTotals, SESSION_SUMMARY_CACHE_VERSION,
     };
     use crate::settings;
+    use std::{
+        collections::{HashMap, HashSet},
+        env, fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn session_with_rates(
         primary_used_percent: f64,
@@ -379,6 +586,33 @@ mod tests {
         }
     }
 
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time works")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("tokenmeter-{name}-{unique}"));
+        fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+
+    fn cache_entry(path: &str, modified_unix_ms: u64, size_bytes: u64) -> CachedSessionSummary {
+        CachedSessionSummary {
+            path: path.to_string(),
+            modified_unix_ms,
+            size_bytes,
+            summary: session_with_rates(10.0, 20.0),
+        }
+    }
+
+    fn snapshot(path: &str, modified_unix_ms: u64, size_bytes: u64) -> SessionFileSnapshot {
+        SessionFileSnapshot {
+            path: PathBuf::from(path),
+            modified_unix_ms,
+            size_bytes,
+        }
+    }
+
     #[test]
     fn format_tray_status_matches_metric_modes() {
         let overview = overview_with_session(session_with_rates(10.4, 20.2));
@@ -413,5 +647,70 @@ mod tests {
             format_tray_status(&overview, settings::TrayMetricMode::Both),
             None,
         );
+    }
+
+    #[test]
+    fn cache_hit_reuses_matching_summary() {
+        let path = "/tmp/session-1.jsonl";
+        let entries = HashMap::from([(path.to_string(), cache_entry(path, 100, 200))]);
+
+        let summary = cached_summary_for_snapshot(&entries, &snapshot(path, 100, 200));
+
+        assert_eq!(summary.and_then(|value| value.model), Some("gpt-5.4".to_string()));
+    }
+
+    #[test]
+    fn changed_file_invalidation_rejects_stale_summary() {
+        let path = "/tmp/session-1.jsonl";
+        let entries = HashMap::from([(path.to_string(), cache_entry(path, 100, 200))]);
+
+        let summary = cached_summary_for_snapshot(&entries, &snapshot(path, 101, 200));
+
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn removed_file_eviction_drops_orphaned_entries() {
+        let path = "/tmp/session-1.jsonl";
+        let retained = retained_cache_entries(vec![cache_entry(path, 100, 200)], &HashSet::new());
+
+        assert!(retained.is_empty());
+    }
+
+    #[test]
+    fn corrupted_cache_falls_back_to_empty_store() {
+        let temp_dir = unique_temp_dir("corrupted-session-cache");
+        let sessions_dir = temp_dir.join("sessions");
+        let cache_path = temp_dir.join("cache.json");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+        fs::write(&cache_path, "{ not-valid-json ").expect("cache should be written");
+
+        let cache = load_session_summary_cache(&cache_path, &sessions_dir);
+
+        assert_eq!(cache.version, SESSION_SUMMARY_CACHE_VERSION);
+        assert_eq!(cache.sessions_dir, sessions_dir.display().to_string());
+        assert!(cache.entries.is_empty());
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn session_summary_cache_round_trips() {
+        let temp_dir = unique_temp_dir("session-cache-round-trip");
+        let sessions_dir = temp_dir.join("sessions");
+        let cache_path = temp_dir.join("cache.json");
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+
+        let mut cache = new_session_summary_cache(&sessions_dir);
+        cache.entries.push(cache_entry("/tmp/session-1.jsonl", 100, 200));
+        save_session_summary_cache(&cache_path, &cache).expect("cache should save");
+
+        let loaded = load_session_summary_cache(&cache_path, &sessions_dir);
+
+        assert_eq!(loaded.version, SESSION_SUMMARY_CACHE_VERSION);
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].path, "/tmp/session-1.jsonl");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 }
