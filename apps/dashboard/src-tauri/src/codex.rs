@@ -17,8 +17,10 @@ use crate::settings;
 const DEFAULT_LIMIT: usize = 12;
 const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 25;
+const SESSION_FILE_INDEX_FILE_NAME: &str = "codex-session-file-index.json";
 const SESSION_SUMMARY_CACHE_FILE_NAME: &str = "codex-session-summary-cache.json";
 const SESSION_SUMMARY_CACHE_VERSION: u32 = 1;
+const SESSION_FILE_INDEX_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,11 +84,31 @@ struct SessionSummaryCache {
     entries: Vec<CachedSessionSummary>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionFileIndex {
+    version: u32,
+    sessions_dir: String,
+    directories: Vec<TrackedDirectorySnapshot>,
+    files: Vec<SessionFileSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrackedDirectorySnapshot {
+    path: String,
+    modified_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionFileSnapshot {
     path: PathBuf,
     modified_unix_ms: u64,
     size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SessionTreeInventory {
+    directories: Vec<TrackedDirectorySnapshot>,
+    files: Vec<SessionFileSnapshot>,
 }
 
 impl CodexSessionSummary {
@@ -135,11 +157,29 @@ fn session_summary_cache_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf,
         .map_err(|error| error.to_string())
 }
 
+fn session_file_index_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .or_else(|_| app.path().app_config_dir())
+        .map(|dir| dir.join(SESSION_FILE_INDEX_FILE_NAME))
+        .map_err(|error| error.to_string())
+}
+
 fn new_session_summary_cache(sessions_dir: &Path) -> SessionSummaryCache {
     SessionSummaryCache {
         version: SESSION_SUMMARY_CACHE_VERSION,
         sessions_dir: sessions_dir.display().to_string(),
         entries: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn new_session_file_index(sessions_dir: &Path) -> SessionFileIndex {
+    SessionFileIndex {
+        version: SESSION_FILE_INDEX_VERSION,
+        sessions_dir: sessions_dir.display().to_string(),
+        directories: Vec::new(),
+        files: Vec::new(),
     }
 }
 
@@ -173,12 +213,51 @@ fn load_session_summary_cache(path: &Path, sessions_dir: &Path) -> SessionSummar
     cache
 }
 
+fn load_session_file_index(path: &Path, sessions_dir: &Path) -> Option<SessionFileIndex> {
+    if !path.exists() {
+        return None;
+    }
+
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            log::warn!("failed to read session file index: {error}");
+            return None;
+        }
+    };
+
+    let index = match serde_json::from_str::<SessionFileIndex>(&contents) {
+        Ok(index) => index,
+        Err(error) => {
+            log::warn!("failed to decode session file index: {error}");
+            return None;
+        }
+    };
+
+    if index.version != SESSION_FILE_INDEX_VERSION
+        || index.sessions_dir != sessions_dir.display().to_string()
+    {
+        return None;
+    }
+
+    Some(index)
+}
+
 fn save_session_summary_cache(path: &Path, cache: &SessionSummaryCache) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
     let payload = serde_json::to_string_pretty(cache).map_err(|error| error.to_string())?;
+    fs::write(path, payload).map_err(|error| error.to_string())
+}
+
+fn save_session_file_index(path: &Path, index: &SessionFileIndex) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let payload = serde_json::to_string_pretty(index).map_err(|error| error.to_string())?;
     fs::write(path, payload).map_err(|error| error.to_string())
 }
 
@@ -230,11 +309,27 @@ fn modified_unix_ms(metadata: &fs::Metadata) -> Option<u64> {
         .ok()
 }
 
-fn recursive_jsonl_file_snapshots(dir: &Path) -> Vec<SessionFileSnapshot> {
-    let mut files = Vec::new();
+fn recursive_session_tree_inventory(dir: &Path) -> SessionTreeInventory {
+    let mut inventory = SessionTreeInventory {
+        directories: Vec::new(),
+        files: Vec::new(),
+    };
+
+    let Ok(metadata) = fs::metadata(dir) else {
+        return inventory;
+    };
+    let Some(dir_modified_unix_ms) = modified_unix_ms(&metadata) else {
+        return inventory;
+    };
+
+    inventory.directories.push(TrackedDirectorySnapshot {
+        path: dir.display().to_string(),
+        modified_unix_ms: dir_modified_unix_ms,
+    });
+
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return files,
+        Err(_) => return inventory,
     };
 
     for entry in entries {
@@ -245,7 +340,9 @@ fn recursive_jsonl_file_snapshots(dir: &Path) -> Vec<SessionFileSnapshot> {
         let path = entry.path();
 
         if path.is_dir() {
-            files.extend(recursive_jsonl_file_snapshots(&path));
+            let nested = recursive_session_tree_inventory(&path);
+            inventory.directories.extend(nested.directories);
+            inventory.files.extend(nested.files);
         } else if path
             .extension()
             .and_then(|value| value.to_str())
@@ -254,19 +351,23 @@ fn recursive_jsonl_file_snapshots(dir: &Path) -> Vec<SessionFileSnapshot> {
             let Ok(metadata) = fs::metadata(&path) else {
                 continue;
             };
-            let Some(modified_unix_ms) = modified_unix_ms(&metadata) else {
+            let Some(file_modified_unix_ms) = modified_unix_ms(&metadata) else {
                 continue;
             };
 
-            files.push(SessionFileSnapshot {
+            inventory.files.push(SessionFileSnapshot {
                 path,
-                modified_unix_ms,
+                modified_unix_ms: file_modified_unix_ms,
                 size_bytes: metadata.len(),
             });
         }
     }
 
-    files
+    inventory
+}
+
+fn recursive_jsonl_file_snapshots(dir: &Path) -> Vec<SessionFileSnapshot> {
+    recursive_session_tree_inventory(dir).files
 }
 
 fn usage_from_value(value: &Value) -> Option<UsageTotals> {
@@ -383,6 +484,81 @@ fn snapshot_path_key(snapshot: &SessionFileSnapshot) -> String {
     snapshot.path.display().to_string()
 }
 
+fn directory_path_key(snapshot: &TrackedDirectorySnapshot) -> String {
+    snapshot.path.clone()
+}
+
+fn session_file_index_is_valid(index: &SessionFileIndex, sessions_dir: &Path) -> bool {
+    if index.sessions_dir != sessions_dir.display().to_string() {
+        return false;
+    }
+
+    let root = match fs::metadata(sessions_dir) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    let Some(root_modified_unix_ms) = modified_unix_ms(&root) else {
+        return false;
+    };
+
+    let root_key = sessions_dir.display().to_string();
+    let Some(root_entry) = index
+        .directories
+        .iter()
+        .find(|entry| directory_path_key(entry) == root_key)
+    else {
+        return false;
+    };
+
+    if root_entry.modified_unix_ms != root_modified_unix_ms {
+        return false;
+    }
+
+    for directory in &index.directories {
+        let Ok(metadata) = fs::metadata(&directory.path) else {
+            return false;
+        };
+        let Some(modified_unix_ms) = modified_unix_ms(&metadata) else {
+            return false;
+        };
+
+        if modified_unix_ms != directory.modified_unix_ms {
+            return false;
+        }
+    }
+
+    for snapshot in &index.files {
+        let Ok(metadata) = fs::metadata(&snapshot.path) else {
+            return false;
+        };
+        let Some(modified_unix_ms) = modified_unix_ms(&metadata) else {
+            return false;
+        };
+
+        if modified_unix_ms != snapshot.modified_unix_ms || metadata.len() != snapshot.size_bytes {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn session_file_index_from_inventory(
+    sessions_dir: &Path,
+    inventory: SessionTreeInventory,
+) -> SessionFileIndex {
+    SessionFileIndex {
+        version: SESSION_FILE_INDEX_VERSION,
+        sessions_dir: sessions_dir.display().to_string(),
+        directories: inventory.directories,
+        files: inventory.files,
+    }
+}
+
+fn session_file_snapshots_from_index(index: &SessionFileIndex) -> Vec<SessionFileSnapshot> {
+    index.files.clone()
+}
+
 fn cache_entry_matches(entry: &CachedSessionSummary, snapshot: &SessionFileSnapshot) -> bool {
     entry.modified_unix_ms == snapshot.modified_unix_ms && entry.size_bytes == snapshot.size_bytes
 }
@@ -424,6 +600,7 @@ fn empty_overview(sessions_dir: &Path, generated_at: String) -> CodexOverview {
 fn get_codex_overview_from_sessions_dir(
     sessions_dir: &Path,
     cache_path: Option<&Path>,
+    file_index_path: Option<&Path>,
     limit: usize,
 ) -> Result<CodexOverview, String> {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -432,7 +609,31 @@ fn get_codex_overview_from_sessions_dir(
         return Ok(empty_overview(sessions_dir, generated_at));
     }
 
-    let mut snapshots = recursive_jsonl_file_snapshots(sessions_dir);
+    let snapshots = if let Some(index_path) = file_index_path {
+        if let Some(index) = load_session_file_index(index_path, sessions_dir) {
+            if session_file_index_is_valid(&index, sessions_dir) {
+                session_file_snapshots_from_index(&index)
+            } else {
+                let inventory = recursive_session_tree_inventory(sessions_dir);
+                let next_index = session_file_index_from_inventory(sessions_dir, inventory.clone());
+                if let Err(error) = save_session_file_index(index_path, &next_index) {
+                    log::warn!("failed to persist session file index: {error}");
+                }
+                inventory.files
+            }
+        } else {
+            let inventory = recursive_session_tree_inventory(sessions_dir);
+            let next_index = session_file_index_from_inventory(sessions_dir, inventory.clone());
+            if let Err(error) = save_session_file_index(index_path, &next_index) {
+                log::warn!("failed to persist session file index: {error}");
+            }
+            inventory.files
+        }
+    } else {
+        recursive_jsonl_file_snapshots(sessions_dir)
+    };
+
+    let mut snapshots = snapshots;
     snapshots.sort_by(|left, right| right.modified_unix_ms.cmp(&left.modified_unix_ms));
 
     let discovered_paths = snapshots
@@ -519,6 +720,13 @@ pub fn get_codex_overview<R: Runtime>(
     limit: usize,
 ) -> Result<CodexOverview, String> {
     let sessions_dir = codex_sessions_dir(app).or_else(|_| default_codex_sessions_dir())?;
+    let file_index_path = match session_file_index_path(app) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            log::warn!("failed to resolve session file index path: {error}");
+            None
+        }
+    };
     let cache_path = match session_summary_cache_path(app) {
         Ok(path) => Some(path),
         Err(error) => {
@@ -527,16 +735,24 @@ pub fn get_codex_overview<R: Runtime>(
         }
     };
 
-    get_codex_overview_from_sessions_dir(&sessions_dir, cache_path.as_deref(), limit)
+    get_codex_overview_from_sessions_dir(
+        &sessions_dir,
+        cache_path.as_deref(),
+        file_index_path.as_deref(),
+        limit,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        cached_summary_for_snapshot, format_tray_status, load_session_summary_cache,
-        new_session_summary_cache, retained_cache_entries, save_session_summary_cache,
-        CachedSessionSummary, CodexOverview, CodexSessionSummary, RateLimitSnapshot,
-        SessionFileSnapshot, UsageTotals, SESSION_SUMMARY_CACHE_VERSION,
+        cached_summary_for_snapshot, format_tray_status, load_session_file_index,
+        load_session_summary_cache, new_session_file_index, new_session_summary_cache,
+        recursive_session_tree_inventory, retained_cache_entries, save_session_file_index,
+        save_session_summary_cache, session_file_index_from_inventory, session_file_index_is_valid,
+        session_file_snapshots_from_index, CachedSessionSummary, CodexOverview,
+        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, UsageTotals,
+        SESSION_FILE_INDEX_VERSION, SESSION_SUMMARY_CACHE_VERSION,
     };
     use crate::settings;
     use std::{
@@ -596,6 +812,21 @@ mod tests {
         path
     }
 
+    fn create_session_tree(base: &PathBuf) -> (PathBuf, PathBuf, PathBuf) {
+        let sessions_dir = base.join("sessions");
+        let nested_dir = sessions_dir.join("2026").join("03");
+        let session_file = nested_dir.join("session-1.jsonl");
+        fs::create_dir_all(&nested_dir).expect("nested dir should be created");
+        fs::write(&session_file, "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"session-1\",\"cwd\":\"/tmp\",\"model\":\"gpt-5.4\",\"effort\":\"medium\"}}\n")
+            .expect("session file should be written");
+        fs::write(
+            nested_dir.join("session-2.jsonl"),
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":42},\"last_token_usage\":{\"total_tokens\":5}},\"rate_limits\":{\"primary\":{\"used_percent\":12.0},\"secondary\":{\"used_percent\":34.0}}},\"timestamp\":\"2026-03-23T00:00:00.000Z\"}\n",
+        )
+        .expect("session file should be written");
+        (sessions_dir, nested_dir, session_file)
+    }
+
     fn cache_entry(path: &str, modified_unix_ms: u64, size_bytes: u64) -> CachedSessionSummary {
         CachedSessionSummary {
             path: path.to_string(),
@@ -611,6 +842,10 @@ mod tests {
             modified_unix_ms,
             size_bytes,
         }
+    }
+
+    fn file_index_path(base: &PathBuf) -> PathBuf {
+        base.join("index.json")
     }
 
     #[test]
@@ -710,6 +945,85 @@ mod tests {
         assert_eq!(loaded.version, SESSION_SUMMARY_CACHE_VERSION);
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(loaded.entries[0].path, "/tmp/session-1.jsonl");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn session_file_index_round_trips_and_reuses_valid_tree() {
+        let temp_dir = unique_temp_dir("session-file-index-round-trip");
+        let (sessions_dir, _nested_dir, _session_file) = create_session_tree(&temp_dir);
+        let index_path = file_index_path(&temp_dir);
+
+        let inventory = recursive_session_tree_inventory(&sessions_dir);
+        let index = session_file_index_from_inventory(&sessions_dir, inventory.clone());
+        save_session_file_index(&index_path, &index).expect("index should save");
+
+        let loaded = load_session_file_index(&index_path, &sessions_dir).expect("index should load");
+
+        assert!(session_file_index_is_valid(&loaded, &sessions_dir));
+        assert_eq!(loaded.version, SESSION_FILE_INDEX_VERSION);
+        assert_eq!(loaded.sessions_dir, sessions_dir.display().to_string());
+        assert_eq!(loaded.files.len(), inventory.files.len());
+        assert_eq!(
+            session_file_snapshots_from_index(&loaded)
+                .into_iter()
+                .map(|snapshot| snapshot.path.display().to_string())
+                .collect::<Vec<_>>(),
+            inventory
+                .files
+                .into_iter()
+                .map(|snapshot| snapshot.path.display().to_string())
+                .collect::<Vec<_>>(),
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn session_file_index_rejects_changed_file_metadata() {
+        let temp_dir = unique_temp_dir("session-file-index-change");
+        let (sessions_dir, _nested_dir, session_file) = create_session_tree(&temp_dir);
+        let index_path = file_index_path(&temp_dir);
+
+        let inventory = recursive_session_tree_inventory(&sessions_dir);
+        let index = session_file_index_from_inventory(&sessions_dir, inventory);
+        save_session_file_index(&index_path, &index).expect("index should save");
+
+        fs::write(&session_file, "changed").expect("session file should change");
+
+        let loaded = load_session_file_index(&index_path, &sessions_dir).expect("index should load");
+        assert!(!session_file_index_is_valid(&loaded, &sessions_dir));
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn session_file_index_rejects_root_mismatch() {
+        let temp_dir = unique_temp_dir("session-file-index-root");
+        let sessions_dir = temp_dir.join("sessions");
+        let other_sessions_dir = temp_dir.join("other-sessions");
+        let index_path = file_index_path(&temp_dir);
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+        fs::create_dir_all(&other_sessions_dir).expect("other sessions dir should exist");
+
+        let index = new_session_file_index(&sessions_dir);
+        save_session_file_index(&index_path, &index).expect("index should save");
+
+        assert!(load_session_file_index(&index_path, &other_sessions_dir).is_none());
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn session_file_index_falls_back_on_corruption() {
+        let temp_dir = unique_temp_dir("session-file-index-corrupted");
+        let sessions_dir = temp_dir.join("sessions");
+        let index_path = file_index_path(&temp_dir);
+        fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
+        fs::write(&index_path, "{ not-valid-json ").expect("corrupt index should be written");
+
+        assert!(load_session_file_index(&index_path, &sessions_dir).is_none());
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
