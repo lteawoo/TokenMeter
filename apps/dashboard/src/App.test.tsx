@@ -372,6 +372,21 @@ describe("App workspace scope selection", () => {
     expect(screen.getByRole("button", { name: /homebrew upgrade/i })).toBeInTheDocument();
   });
 
+  it("opens the GitHub repository from the dashboard header", async () => {
+    render(<App />);
+
+    const repositoryButton = await screen.findByRole("button", {
+      name: /open github repository/i,
+    });
+    fireEvent.click(repositoryButton);
+
+    await waitFor(() => {
+      expect(openExternalUrlMock).toHaveBeenCalledWith(
+        "https://github.com/lteawoo/TokenMeter",
+      );
+    });
+  });
+
   it("polls the dashboard only while the document is visible", async () => {
     vi.useFakeTimers();
     try {
