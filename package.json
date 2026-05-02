@@ -1,7 +1,7 @@
 {
   "name": "tokenmeter",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "license": "MIT",
   "packageManager": "pnpm@10.24.0",
   "scripts": {
