@@ -1,7 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CodexOverview, CodexSessionSummary, UsageTotals } from "@tokenmeter/core";
+import type {
+  CodexOverview,
+  CodexSessionSummary,
+  DailyUsageSummary,
+  UsageTotals,
+} from "@tokenmeter/core";
 import type { AppSettings } from "@/lib/app-settings";
 import type { AppUpdateState } from "@/lib/app-updates";
 
@@ -106,6 +111,19 @@ function createSession(
   };
 }
 
+function createDailyUsage(
+  overrides: Pick<DailyUsageSummary, "date" | "cwd"> &
+    Partial<DailyUsageSummary>,
+): DailyUsageSummary {
+  return {
+    date: overrides.date,
+    cwd: overrides.cwd,
+    filePath: overrides.filePath ?? null,
+    sessionCount: overrides.sessionCount ?? 1,
+    usage: overrides.usage ?? createUsageTotals(1000),
+  };
+}
+
 const overview: CodexOverview = {
   provider: "codex",
   generatedAt: "2026-03-22T08:40:00.000Z",
@@ -140,6 +158,29 @@ const overview: CodexOverview = {
       updatedAt: "2026-03-22T08:33:00.000Z",
       totalUsage: createUsageTotals(900),
       lastUsage: createUsageTotals(90),
+    }),
+  ],
+  dailyUsage: [
+    createDailyUsage({
+      date: "2026-03-20",
+      cwd: "/Users/twlee/projects",
+      usage: createUsageTotals(500),
+    }),
+    createDailyUsage({
+      date: "2026-03-21",
+      cwd: "/Users/twlee/projects/memeplate",
+      usage: createUsageTotals(1200),
+    }),
+    createDailyUsage({
+      date: "2026-03-22",
+      cwd: "/Users/twlee/projects/memeplate",
+      sessionCount: 2,
+      usage: createUsageTotals(3500),
+    }),
+    createDailyUsage({
+      date: "2026-03-22",
+      cwd: "/Users/twlee/projects/my-skills",
+      usage: createUsageTotals(900),
     }),
   ],
   latestSession: null,
@@ -235,8 +276,8 @@ describe("App workspace scope selection", () => {
 
     const areaChart = screen.getByTestId("area-chart");
     const barChart = screen.getByTestId("bar-chart");
-    expect(areaChart.dataset.chart).toContain("projects/memeplate");
-    expect(areaChart.dataset.chart).not.toContain("projects/my-skills");
+    expect(areaChart.dataset.chart).toContain("\"dailyTokens\":3500");
+    expect(areaChart.dataset.chart).not.toContain("\"dailyTokens\":900");
     expect(barChart.dataset.chart).toContain("projects/memeplate");
     expect(barChart.dataset.chart).not.toContain("my-skills");
 
@@ -285,7 +326,10 @@ describe("App workspace scope selection", () => {
     });
 
     expect(screen.getByText("projects/my-skills · 1 session")).toBeInTheDocument();
-    expect(screen.getByText("900")).toBeInTheDocument();
+    expect(screen.getAllByText("900").length).toBeGreaterThan(0);
+    expect(screen.getByText("Input today")).toBeInTheDocument();
+    expect(screen.getByText("Output today")).toBeInTheDocument();
+    expect(screen.getByText("90")).toBeInTheDocument();
   });
 
   it("hydrates desktop settings, applies the light theme, and saves updated tray preferences", async () => {
