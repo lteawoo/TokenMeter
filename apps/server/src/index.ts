@@ -4,7 +4,7 @@ import cors from "cors";
 import express from "express";
 import {
   DEFAULT_CODEX_SESSIONS_DIR,
-  listRecentCodexSessions,
+  getCodexOverviewData,
   summariseCodexSessions,
 } from "@tokenmeter/core/codex";
 
@@ -32,11 +32,14 @@ app.get("/api/providers/codex/overview", async (req, res) => {
   );
 
   try {
-    const sessions = await listRecentCodexSessions({
+    const overviewData = await getCodexOverviewData({
       limit,
       rootDir: codexRootPath,
     });
-    const summary = summariseCodexSessions(sessions);
+    const summary = summariseCodexSessions(
+      overviewData.sessions,
+      overviewData.dailyUsage,
+    );
 
     res.json({
       provider: "codex",

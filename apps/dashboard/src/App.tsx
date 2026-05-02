@@ -7,7 +7,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CodexOverview, CodexSessionSummary } from "@tokenmeter/core";
+import type {
+  CodexOverview,
+  CodexSessionSummary,
+  DailyUsageSummary,
+} from "@tokenmeter/core";
 import {
   Activity,
   ArrowDownToLine,
@@ -154,6 +158,36 @@ function formatTime(value: string | null | undefined) {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
+}
+
+function formatDateKey(value: Date) {
+  const year = value.getFullYear();
+  const month = `${value.getMonth() + 1}`.padStart(2, "0");
+  const day = `${value.getDate()}`.padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function getDateKeyFromIso(value: string | null | undefined) {
+  const parsed = value ? new Date(value) : new Date();
+
+  return formatDateKey(Number.isNaN(parsed.getTime()) ? new Date() : parsed);
+}
+
+function getLastSevenDateKeys(todayKey: string) {
+  const today = new Date(`${todayKey}T00:00:00`);
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (6 - index));
+    return formatDateKey(date);
+  });
+}
+
+function formatShortDateKey(value: string) {
+  const [, month, day] = value.split("-");
+
+  return month && day ? `${month}/${day}` : value;
 }
 
 function formatModelLabel(session: Pick<CodexSessionSummary, "model" | "effort"> | null) {
@@ -455,6 +489,33 @@ function addUsageTotals(
       left.reasoningOutputTokens + right.reasoningOutputTokens,
     totalTokens: left.totalTokens + right.totalTokens,
   };
+}
+
+function getDailyWorkspaceValue(record: DailyUsageSummary) {
+  return record.cwd ?? record.filePath ?? "";
+}
+
+function aggregateDailyUsageByDate(
+  records: DailyUsageSummary[],
+  todayKey: string,
+) {
+  const usageByDate = new Map<string, CodexOverview["totals"]>();
+
+  records.forEach((record) => {
+    usageByDate.set(
+      record.date,
+      addUsageTotals(usageByDate.get(record.date) ?? ZERO_USAGE_TOTALS, record.usage),
+    );
+  });
+
+  return getLastSevenDateKeys(todayKey).map((date) => ({
+    date,
+    label: formatShortDateKey(date),
+    dailyTokens: usageByDate.get(date)?.totalTokens ?? 0,
+    totalTokens: usageByDate.get(date)?.totalTokens ?? 0,
+    inputTokens: usageByDate.get(date)?.inputTokens ?? 0,
+    outputTokens: usageByDate.get(date)?.outputTokens ?? 0,
+  }));
 }
 
 function App() {
@@ -928,6 +989,45 @@ function App() {
   }, [selectedWorkspace, sessions]);
 
   const latest = filteredSessions[0] ?? null;
+  const todayKey = getDateKeyFromIso(overview?.generatedAt);
+  const dailyUsageRecords = overview?.dailyUsage ?? [];
+  const filteredDailyUsageRecords = useMemo(() => {
+    if (selectedWorkspace === ALL_WORKSPACES_VALUE) {
+      return dailyUsageRecords;
+    }
+
+    return dailyUsageRecords.filter(
+      (record) => getDailyWorkspaceValue(record) === selectedWorkspace,
+    );
+  }, [dailyUsageRecords, selectedWorkspace]);
+  const dailyChartData = useMemo(
+    () => aggregateDailyUsageByDate(filteredDailyUsageRecords, todayKey),
+    [filteredDailyUsageRecords, todayKey],
+  );
+  const todayDailyUsage = dailyChartData.at(-1) ?? {
+    date: todayKey,
+    label: formatShortDateKey(todayKey),
+    dailyTokens: 0,
+    totalTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+  const todayUsage = todayDailyUsage.totalTokens;
+  const sevenDayTotal = dailyChartData.reduce(
+    (total, record) => total + record.totalTokens,
+    0,
+  );
+  const dailyAverage = Math.round(sevenDayTotal / dailyChartData.length);
+  const peakDay = dailyChartData.reduce(
+    (peak, record) => (record.totalTokens > peak.totalTokens ? record : peak),
+    dailyChartData[0] ?? {
+      date: todayKey,
+      label: formatShortDateKey(todayKey),
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    },
+  );
   const providerLabel = getProviderLabel(overview?.provider);
   const refreshControlPending = overviewPending || manualRefreshFeedback;
   const compactUpdateCardVisible = shouldShowCompactUpdateCard(appUpdateState);
@@ -939,14 +1039,6 @@ function App() {
     () =>
       filteredSessions.reduce(
         (acc, session) => addUsageTotals(acc, session.totalUsage),
-        ZERO_USAGE_TOTALS,
-      ),
-    [filteredSessions],
-  );
-  const filteredLastTurnTotals = useMemo(
-    () =>
-      filteredSessions.reduce(
-        (acc, session) => addUsageTotals(acc, session.lastUsage),
         ZERO_USAGE_TOTALS,
       ),
     [filteredSessions],
@@ -996,6 +1088,10 @@ function App() {
     lastTurnTokens: {
       label: "Last Turn",
       color: "var(--chart-2)",
+    },
+    dailyTokens: {
+      label: "Daily Tokens",
+      color: "var(--chart-1)",
     },
   } satisfies ChartConfig;
 
@@ -1079,6 +1175,25 @@ function App() {
               />
             ) : null}
 
+            <div className="rounded-2xl border border-border/70 bg-secondary/30 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
+                    Today
+                  </p>
+                  <p className="mt-2 font-mono text-3xl font-semibold text-foreground">
+                    {formatCompactTokenNumber(todayUsage)}
+                  </p>
+                </div>
+                <div className="grid gap-1 text-right font-mono text-[10px] text-muted-foreground">
+                  <span>Avg {formatCompactTokenNumber(dailyAverage)}</span>
+                  <span>
+                    Peak {formatCompactTokenNumber(peakDay.totalTokens)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-2 gap-2">
               <CompactStatTile
                 label="5h left"
@@ -1089,12 +1204,12 @@ function App() {
                 value={`${secondaryRemaining}%`}
               />
               <CompactStatTile
-                label="Input"
-                value={formatNumber(filteredTotals.inputTokens)}
+                label="Input today"
+                value={formatCompactTokenNumber(todayDailyUsage.inputTokens)}
               />
               <CompactStatTile
-                label="Output"
-                value={formatNumber(filteredTotals.outputTokens)}
+                label="Output today"
+                value={formatCompactTokenNumber(todayDailyUsage.outputTokens)}
               />
             </div>
 
@@ -1308,27 +1423,27 @@ function App() {
               <>
                 <StatCard
                   icon={<Gauge className="size-4" />}
-                  label="Total tokens"
-                  value={formatNumber(filteredTotals.totalTokens)}
-                  detail="Accumulated token volume across the tracked recent sessions."
+                  label="Today tokens"
+                  value={formatNumber(todayUsage)}
+                  detail="Token usage bucketed to today's local date from session token-count deltas."
                 />
                 <StatCard
                   icon={<Sparkles className="size-4" />}
-                  label="Last turn tokens"
-                  value={formatNumber(filteredLastTurnTotals.totalTokens)}
-                  detail="Latest burst of token usage, useful for spotting context blowups."
+                  label="7-day total"
+                  value={formatNumber(sevenDayTotal)}
+                  detail="Rolling local-date total from the latest seven daily buckets."
                 />
                 <StatCard
                   icon={<ArrowDownToLine className="size-4" />}
-                  label="Total input"
-                  value={formatNumber(filteredTotals.inputTokens)}
-                  detail="Summed input tokens across the tracked recent sessions."
+                  label="Daily average"
+                  value={formatNumber(dailyAverage)}
+                  detail="Average daily token volume across the current 7-day window."
                 />
                 <StatCard
                   icon={<ArrowUpFromLine className="size-4" />}
-                  label="Total output"
-                  value={formatNumber(filteredTotals.outputTokens)}
-                  detail="Summed output tokens across the tracked recent sessions."
+                  label="Peak day"
+                  value={formatNumber(peakDay.totalTokens)}
+                  detail={`Highest day in the 7-day window: ${formatShortDateKey(peakDay.date)}.`}
                 />
                 <StatCard
                   icon={<Bot className="size-4" />}
@@ -1362,29 +1477,29 @@ function App() {
                   <CardHeader className="flex flex-row items-start justify-between space-y-0">
                     <div>
                       <CardTitle className="font-mono text-xl">
-                        Usage flow
+                        Daily usage
                       </CardTitle>
                       <CardDescription>
-                        Session totals versus last-turn share by session.
+                        Local-date token usage from token-count deltas.
                       </CardDescription>
                     </div>
                     <Badge
                       variant="outline"
                       className="border-border/80 bg-background/60 font-mono text-xs"
                     >
-                      last 8 sessions
+                      last 7 days
                     </Badge>
                   </CardHeader>
                   <CardContent>
-                    {chartData.length ? (
+                    {dailyChartData.length ? (
                       <ChartContainer
                         config={chartConfig}
                         className="h-[320px] w-full"
                       >
-                        <AreaChart data={chartData}>
+                        <AreaChart data={dailyChartData}>
                           <defs>
                             <linearGradient
-                              id="fillTotalTokens"
+                              id="fillDailyTokens"
                               x1="0"
                               y1="0"
                               x2="0"
@@ -1392,12 +1507,12 @@ function App() {
                             >
                               <stop
                                 offset="5%"
-                                stopColor="var(--color-totalTokens)"
+                                stopColor="var(--color-dailyTokens)"
                                 stopOpacity={0.34}
                               />
                               <stop
                                 offset="95%"
-                                stopColor="var(--color-totalTokens)"
+                                stopColor="var(--color-dailyTokens)"
                                 stopOpacity={0}
                               />
                             </linearGradient>
@@ -1411,18 +1526,6 @@ function App() {
                             tickFormatter={(value) =>
                               formatCompactTokenNumber(Number(value))
                             }
-                            yAxisId="tokens"
-                          />
-                          <YAxis
-                            axisLine={false}
-                            orientation="right"
-                            tickLine={false}
-                            tickMargin={12}
-                            tickFormatter={(value) =>
-                              formatSharePercent(Number(value))
-                            }
-                            width={52}
-                            yAxisId="share"
                           />
                           <XAxis
                             axisLine={false}
@@ -1461,28 +1564,18 @@ function App() {
                           />
                           <ChartLegend content={<ChartLegendContent />} />
                           <Area
-                            dataKey="totalTokens"
-                            fill="url(#fillTotalTokens)"
+                            dataKey="dailyTokens"
+                            fill="url(#fillDailyTokens)"
                             fillOpacity={1}
-                            stroke="var(--color-totalTokens)"
+                            stroke="var(--color-dailyTokens)"
                             strokeWidth={2}
                             type="monotone"
-                            yAxisId="tokens"
-                          />
-                          <Area
-                            dataKey="lastTurnShare"
-                            fillOpacity={0}
-                            stroke="var(--color-lastTurnShare)"
-                            strokeDasharray="6 4"
-                            strokeWidth={2}
-                            type="monotone"
-                            yAxisId="share"
                           />
                         </AreaChart>
                       </ChartContainer>
                     ) : (
                       <div className="flex h-[320px] items-center justify-center text-sm text-muted-foreground">
-                        No recent chartable sessions found.
+                        No daily usage found.
                       </div>
                     )}
                   </CardContent>

@@ -29,12 +29,21 @@ export type CodexSessionSummary = {
   status: "active" | "idle";
 };
 
+export type DailyUsageSummary = {
+  date: string;
+  cwd: string | null;
+  filePath: string | null;
+  sessionCount: number;
+  usage: UsageTotals;
+};
+
 export type CodexOverview = {
   provider: ProviderId;
   generatedAt: string;
   sessionsDir: string;
   latestSession: CodexSessionSummary | null;
   sessions: CodexSessionSummary[];
+  dailyUsage: DailyUsageSummary[];
   totals: UsageTotals;
   lastTurnTotals: UsageTotals;
 };

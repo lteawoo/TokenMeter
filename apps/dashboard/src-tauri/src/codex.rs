@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     fs::{self, DirEntry, File},
     io::{BufRead, BufReader},
@@ -7,7 +7,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, Local, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, Runtime};
@@ -19,9 +19,10 @@ const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 25;
 const SESSION_FILE_INDEX_FILE_NAME: &str = "codex-session-file-index.json";
 const SESSION_SUMMARY_CACHE_FILE_NAME: &str = "codex-session-summary-cache.json";
-const SESSION_SUMMARY_CACHE_VERSION: u32 = 3;
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 4;
 const SESSION_FILE_INDEX_VERSION: u32 = 1;
 const PREFERRED_PLAN_LIMIT_ID: &str = "codex";
+const DEFAULT_DAILY_WINDOW_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,6 +61,16 @@ pub struct CodexSessionSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DailyUsageSummary {
+    date: String,
+    cwd: Option<String>,
+    file_path: Option<String>,
+    session_count: u64,
+    usage: UsageTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StoredSessionSummary {
     id: String,
     file_path: String,
@@ -72,6 +83,7 @@ struct StoredSessionSummary {
     last_usage: Option<UsageTotals>,
     primary_rate_limit: Option<RateLimitSnapshot>,
     secondary_rate_limit: Option<RateLimitSnapshot>,
+    daily_usage: Vec<DailyUsageSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +94,7 @@ pub struct CodexOverview {
     sessions_dir: String,
     latest_session: Option<CodexSessionSummary>,
     sessions: Vec<CodexSessionSummary>,
+    daily_usage: Vec<DailyUsageSummary>,
     totals: UsageTotals,
     last_turn_totals: UsageTotals,
 }
@@ -143,6 +156,7 @@ impl StoredSessionSummary {
             last_usage: None,
             primary_rate_limit: None,
             secondary_rate_limit: None,
+            daily_usage: Vec::new(),
         }
     }
 }
@@ -444,12 +458,95 @@ fn should_replace_rate_limits(current_limit_id: Option<&str>, next_limit_id: Opt
 
 fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
     if let Some(value) = right {
-        left.input_tokens += value.input_tokens;
-        left.cached_input_tokens += value.cached_input_tokens;
-        left.output_tokens += value.output_tokens;
-        left.reasoning_output_tokens += value.reasoning_output_tokens;
-        left.total_tokens += value.total_tokens;
+        add_usage_value(left, value);
     }
+}
+
+fn add_usage_value(left: &mut UsageTotals, right: &UsageTotals) {
+    left.input_tokens += right.input_tokens;
+    left.cached_input_tokens += right.cached_input_tokens;
+    left.output_tokens += right.output_tokens;
+    left.reasoning_output_tokens += right.reasoning_output_tokens;
+    left.total_tokens += right.total_tokens;
+}
+
+fn usage_delta(current: &UsageTotals, previous: Option<&UsageTotals>) -> UsageTotals {
+    let Some(previous) = previous else {
+        return current.clone();
+    };
+
+    UsageTotals {
+        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+        cached_input_tokens: current
+            .cached_input_tokens
+            .saturating_sub(previous.cached_input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+        reasoning_output_tokens: current
+            .reasoning_output_tokens
+            .saturating_sub(previous.reasoning_output_tokens),
+        total_tokens: current.total_tokens.saturating_sub(previous.total_tokens),
+    }
+}
+
+fn local_date_from_timestamp(timestamp: Option<&str>, fallback: DateTime<Utc>) -> String {
+    timestamp
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Local))
+        .unwrap_or_else(|| fallback.with_timezone(&Local))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn daily_usage_key(date: &str, cwd: &Option<String>, file_path: &str) -> (String, String) {
+    (
+        date.to_string(),
+        cwd.clone().unwrap_or_else(|| file_path.to_string()),
+    )
+}
+
+fn add_session_daily_usage(
+    entries: &mut BTreeMap<(String, String), DailyUsageSummary>,
+    date: String,
+    cwd: Option<String>,
+    file_path: &str,
+    usage: UsageTotals,
+) {
+    let key = daily_usage_key(&date, &cwd, file_path);
+
+    if let Some(existing) = entries.get_mut(&key) {
+        add_usage_value(&mut existing.usage, &usage);
+        return;
+    }
+
+    entries.insert(
+        key,
+        DailyUsageSummary {
+            date,
+            cwd: cwd.clone(),
+            file_path: cwd.is_none().then(|| file_path.to_string()),
+            session_count: 1,
+            usage,
+        },
+    );
+}
+
+fn add_daily_usage_record(
+    entries: &mut BTreeMap<(String, String), DailyUsageSummary>,
+    record: &DailyUsageSummary,
+) {
+    let key = daily_usage_key(
+        &record.date,
+        &record.cwd,
+        record.file_path.as_deref().unwrap_or_default(),
+    );
+
+    if let Some(existing) = entries.get_mut(&key) {
+        existing.session_count += record.session_count;
+        add_usage_value(&mut existing.usage, &record.usage);
+        return;
+    }
+
+    entries.insert(key, record.clone());
 }
 
 fn enrich_session_summary(
@@ -477,6 +574,12 @@ fn enrich_session_summary(
 fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
     let mut summary = StoredSessionSummary::empty(path);
     let mut selected_rate_limit_id: Option<String> = None;
+    let mut previous_total_usage: Option<UsageTotals> = None;
+    let mut daily_usage_entries: BTreeMap<(String, String), DailyUsageSummary> = BTreeMap::new();
+    let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+    let modified = metadata.modified().map_err(|err| err.to_string())?;
+    let fallback_updated_at = DateTime::<Utc>::from(modified);
+    let file_path = path.display().to_string();
     let file = File::open(path).map_err(|err| err.to_string())?;
     let reader = BufReader::new(file);
 
@@ -512,8 +615,20 @@ fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
             && event["payload"]["type"].as_str() == Some("token_count")
         {
             let info = &event["payload"]["info"];
-            summary.total_usage =
-                usage_from_value(&info["total_token_usage"]).or(summary.total_usage);
+            if let Some(total_usage) = usage_from_value(&info["total_token_usage"]) {
+                let delta = usage_delta(&total_usage, previous_total_usage.as_ref());
+                let date =
+                    local_date_from_timestamp(event["timestamp"].as_str(), fallback_updated_at);
+                add_session_daily_usage(
+                    &mut daily_usage_entries,
+                    date,
+                    summary.cwd.clone(),
+                    &file_path,
+                    delta,
+                );
+                previous_total_usage = Some(total_usage.clone());
+                summary.total_usage = Some(total_usage);
+            }
             summary.last_usage = usage_from_value(&info["last_token_usage"]).or(summary.last_usage);
             let next_rate_limit_id = event["payload"]["rate_limits"]["limit_id"].as_str();
             if should_replace_rate_limits(selected_rate_limit_id.as_deref(), next_rate_limit_id) {
@@ -533,11 +648,10 @@ fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
     }
 
     if summary.updated_at.starts_with("1970-01-01") {
-        let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
-        let modified = metadata.modified().map_err(|err| err.to_string())?;
-        summary.updated_at =
-            DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true);
+        summary.updated_at = fallback_updated_at.to_rfc3339_opts(SecondsFormat::Millis, true);
     }
+
+    summary.daily_usage = daily_usage_entries.into_values().collect();
 
     Ok(summary)
 }
@@ -654,9 +768,19 @@ fn empty_overview(sessions_dir: &Path, generated_at: String) -> CodexOverview {
         sessions_dir: sessions_dir.display().to_string(),
         latest_session: None,
         sessions: Vec::new(),
+        daily_usage: Vec::new(),
         totals: UsageTotals::default(),
         last_turn_totals: UsageTotals::default(),
     }
+}
+
+fn should_parse_snapshot_for_overview(
+    index: usize,
+    snapshot: &SessionFileSnapshot,
+    limit: usize,
+    daily_window_start_unix_ms: u64,
+) -> bool {
+    index < limit || snapshot.modified_unix_ms >= daily_window_start_unix_ms
 }
 
 fn get_codex_overview_from_sessions_dir(
@@ -667,6 +791,9 @@ fn get_codex_overview_from_sessions_dir(
 ) -> Result<CodexOverview, String> {
     let now = Utc::now();
     let generated_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let daily_window_start_unix_ms = (now - Duration::days(DEFAULT_DAILY_WINDOW_DAYS))
+        .timestamp_millis()
+        .max(0) as u64;
 
     if !sessions_dir.is_dir() {
         return Ok(empty_overview(sessions_dir, generated_at));
@@ -712,36 +839,50 @@ fn get_codex_overview_from_sessions_dir(
     let mut entries_by_path = retained_cache_entries(entries_by_path, &discovered_paths);
 
     let mut sessions = Vec::new();
+    let mut daily_usage_entries: BTreeMap<(String, String), DailyUsageSummary> = BTreeMap::new();
 
-    for snapshot in snapshots.iter().take(limit) {
-        let path_key = snapshot_path_key(snapshot);
-
-        if let Some(summary) = cached_summary_for_snapshot(&entries_by_path, snapshot) {
-            sessions.push(enrich_session_summary(summary, now));
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if !should_parse_snapshot_for_overview(index, snapshot, limit, daily_window_start_unix_ms) {
             continue;
         }
 
-        match parse_session_file(&snapshot.path) {
-            Ok(stored_summary) => {
-                entries_by_path.insert(
-                    path_key.clone(),
-                    CachedSessionSummary {
-                        path: path_key,
-                        modified_unix_ms: snapshot.modified_unix_ms,
-                        size_bytes: snapshot.size_bytes,
-                        summary: stored_summary.clone(),
-                    },
-                );
-                sessions.push(enrich_session_summary(stored_summary, now));
-            }
-            Err(error) => {
-                entries_by_path.remove(&path_key);
-                log::warn!(
-                    "failed to parse session file for overview cache refresh ({}): {}",
-                    snapshot.path.display(),
-                    error
-                );
-            }
+        let path_key = snapshot_path_key(snapshot);
+
+        let stored_summary =
+            if let Some(summary) = cached_summary_for_snapshot(&entries_by_path, snapshot) {
+                summary
+            } else {
+                match parse_session_file(&snapshot.path) {
+                    Ok(stored_summary) => {
+                        entries_by_path.insert(
+                            path_key.clone(),
+                            CachedSessionSummary {
+                                path: path_key,
+                                modified_unix_ms: snapshot.modified_unix_ms,
+                                size_bytes: snapshot.size_bytes,
+                                summary: stored_summary.clone(),
+                            },
+                        );
+                        stored_summary
+                    }
+                    Err(error) => {
+                        entries_by_path.remove(&path_key);
+                        log::warn!(
+                            "failed to parse session file for overview cache refresh ({}): {}",
+                            snapshot.path.display(),
+                            error
+                        );
+                        continue;
+                    }
+                }
+            };
+
+        for record in &stored_summary.daily_usage {
+            add_daily_usage_record(&mut daily_usage_entries, record);
+        }
+
+        if index < limit {
+            sessions.push(enrich_session_summary(stored_summary, now));
         }
     }
 
@@ -772,6 +913,7 @@ fn get_codex_overview_from_sessions_dir(
         sessions_dir: sessions_dir.display().to_string(),
         latest_session: sessions.first().cloned(),
         sessions,
+        daily_usage: daily_usage_entries.into_values().collect(),
         totals,
         last_turn_totals,
     })
@@ -813,9 +955,10 @@ mod tests {
         modified_unix_ms, new_session_file_index, new_session_summary_cache, parse_session_file,
         recursive_session_tree_inventory, retained_cache_entries, save_session_file_index,
         save_session_summary_cache, session_file_index_from_inventory, session_file_index_is_valid,
-        session_file_snapshots_from_index, CachedSessionSummary, CodexOverview,
-        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, StoredSessionSummary,
-        UsageTotals, SESSION_FILE_INDEX_VERSION, SESSION_SUMMARY_CACHE_VERSION,
+        session_file_snapshots_from_index, should_parse_snapshot_for_overview,
+        CachedSessionSummary, CodexOverview, CodexSessionSummary, RateLimitSnapshot,
+        SessionFileSnapshot, StoredSessionSummary, UsageTotals, SESSION_FILE_INDEX_VERSION,
+        SESSION_SUMMARY_CACHE_VERSION,
     };
     use crate::settings;
     use chrono::{Duration, SecondsFormat, Utc};
@@ -850,6 +993,7 @@ mod tests {
                 window_minutes: Some(10_080),
                 resets_at: None,
             }),
+            daily_usage: Vec::new(),
         }
     }
 
@@ -870,6 +1014,7 @@ mod tests {
             sessions_dir: "/tmp".into(),
             latest_session: Some(session.clone()),
             sessions: vec![session],
+            daily_usage: Vec::new(),
             totals: UsageTotals::default(),
             last_turn_totals: UsageTotals::default(),
         }
@@ -947,6 +1092,7 @@ mod tests {
             sessions_dir: "/tmp".into(),
             latest_session: None,
             sessions: Vec::new(),
+            daily_usage: Vec::new(),
             totals: UsageTotals::default(),
             last_turn_totals: UsageTotals::default(),
         };
@@ -1162,6 +1308,64 @@ mod tests {
         );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn parser_builds_daily_usage_from_total_usage_deltas() {
+        let temp_dir = unique_temp_dir("daily-usage-deltas");
+        let session_path = temp_dir.join("session.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"session-1\",\"cwd\":\"/tmp/project\",\"model\":\"gpt-5.4\"}}\n",
+                "{\"timestamp\":\"2026-05-01T12:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110}}}}\n",
+                "{\"timestamp\":\"2026-05-01T12:01:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":150,\"output_tokens\":20,\"total_tokens\":170}}}}\n",
+                "{\"timestamp\":\"2026-05-02T12:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":120,\"output_tokens\":30,\"total_tokens\":150}}}}\n",
+            ),
+        )
+        .expect("session file should be written");
+
+        let summary = parse_session_file(&session_path).expect("session should parse");
+
+        assert_eq!(summary.daily_usage.len(), 2);
+        assert_eq!(summary.daily_usage[0].date, "2026-05-01");
+        assert_eq!(summary.daily_usage[0].cwd, Some("/tmp/project".into()));
+        assert_eq!(summary.daily_usage[0].session_count, 1);
+        assert_eq!(summary.daily_usage[0].usage.input_tokens, 150);
+        assert_eq!(summary.daily_usage[0].usage.output_tokens, 20);
+        assert_eq!(summary.daily_usage[0].usage.total_tokens, 170);
+        assert_eq!(summary.daily_usage[1].date, "2026-05-02");
+        assert_eq!(summary.daily_usage[1].usage.input_tokens, 0);
+        assert_eq!(summary.daily_usage[1].usage.output_tokens, 10);
+        assert_eq!(summary.daily_usage[1].usage.total_tokens, 0);
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn overview_parser_skips_old_snapshots_outside_recent_session_limit() {
+        let old_snapshot = snapshot("/tmp/old-session.jsonl", 1_000, 100);
+        let recent_snapshot = snapshot("/tmp/recent-session.jsonl", 50_000, 100);
+        let daily_window_start_unix_ms = 10_000;
+
+        assert!(should_parse_snapshot_for_overview(
+            0,
+            &old_snapshot,
+            1,
+            daily_window_start_unix_ms,
+        ));
+        assert!(!should_parse_snapshot_for_overview(
+            1,
+            &old_snapshot,
+            1,
+            daily_window_start_unix_ms,
+        ));
+        assert!(should_parse_snapshot_for_overview(
+            1,
+            &recent_snapshot,
+            1,
+            daily_window_start_unix_ms,
+        ));
     }
 
     #[test]
