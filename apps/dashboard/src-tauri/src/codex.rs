@@ -19,8 +19,9 @@ const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 25;
 const SESSION_FILE_INDEX_FILE_NAME: &str = "codex-session-file-index.json";
 const SESSION_SUMMARY_CACHE_FILE_NAME: &str = "codex-session-summary-cache.json";
-const SESSION_SUMMARY_CACHE_VERSION: u32 = 2;
+const SESSION_SUMMARY_CACHE_VERSION: u32 = 3;
 const SESSION_FILE_INDEX_VERSION: u32 = 1;
+const PREFERRED_PLAN_LIMIT_ID: &str = "codex";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -429,6 +430,18 @@ fn rate_limit_from_value(value: &Value) -> Option<RateLimitSnapshot> {
     })
 }
 
+fn should_replace_rate_limits(current_limit_id: Option<&str>, next_limit_id: Option<&str>) -> bool {
+    if next_limit_id == Some(PREFERRED_PLAN_LIMIT_ID) {
+        return true;
+    }
+
+    if current_limit_id == Some(PREFERRED_PLAN_LIMIT_ID) {
+        return false;
+    }
+
+    true
+}
+
 fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
     if let Some(value) = right {
         left.input_tokens += value.input_tokens;
@@ -439,7 +452,10 @@ fn add_usage(left: &mut UsageTotals, right: &Option<UsageTotals>) {
     }
 }
 
-fn enrich_session_summary(summary: StoredSessionSummary, now: DateTime<Utc>) -> CodexSessionSummary {
+fn enrich_session_summary(
+    summary: StoredSessionSummary,
+    now: DateTime<Utc>,
+) -> CodexSessionSummary {
     let status = session_status_from_updated_at(&summary.updated_at, now);
 
     CodexSessionSummary {
@@ -460,6 +476,7 @@ fn enrich_session_summary(summary: StoredSessionSummary, now: DateTime<Utc>) -> 
 
 fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
     let mut summary = StoredSessionSummary::empty(path);
+    let mut selected_rate_limit_id: Option<String> = None;
     let file = File::open(path).map_err(|err| err.to_string())?;
     let reader = BufReader::new(file);
 
@@ -498,12 +515,16 @@ fn parse_session_file(path: &Path) -> Result<StoredSessionSummary, String> {
             summary.total_usage =
                 usage_from_value(&info["total_token_usage"]).or(summary.total_usage);
             summary.last_usage = usage_from_value(&info["last_token_usage"]).or(summary.last_usage);
-            summary.primary_rate_limit =
-                rate_limit_from_value(&event["payload"]["rate_limits"]["primary"])
-                    .or(summary.primary_rate_limit);
-            summary.secondary_rate_limit =
-                rate_limit_from_value(&event["payload"]["rate_limits"]["secondary"])
-                    .or(summary.secondary_rate_limit);
+            let next_rate_limit_id = event["payload"]["rate_limits"]["limit_id"].as_str();
+            if should_replace_rate_limits(selected_rate_limit_id.as_deref(), next_rate_limit_id) {
+                selected_rate_limit_id = next_rate_limit_id.map(str::to_string);
+                summary.primary_rate_limit =
+                    rate_limit_from_value(&event["payload"]["rate_limits"]["primary"])
+                        .or(summary.primary_rate_limit);
+                summary.secondary_rate_limit =
+                    rate_limit_from_value(&event["payload"]["rate_limits"]["secondary"])
+                        .or(summary.secondary_rate_limit);
+            }
             summary.updated_at = event["timestamp"]
                 .as_str()
                 .map(str::to_string)
@@ -687,10 +708,7 @@ fn get_codex_overview_from_sessions_dir(
         .map(|path| load_session_summary_cache(path, sessions_dir))
         .unwrap_or_else(|| new_session_summary_cache(sessions_dir));
 
-    let entries_by_path = cache
-        .entries
-        .drain(..)
-        .collect::<Vec<_>>();
+    let entries_by_path = cache.entries.drain(..).collect::<Vec<_>>();
     let mut entries_by_path = retained_cache_entries(entries_by_path, &discovered_paths);
 
     let mut sessions = Vec::new();
@@ -739,7 +757,9 @@ fn get_codex_overview_from_sessions_dir(
 
     if let Some(path) = cache_path {
         cache.entries = entries_by_path.into_values().collect();
-        cache.entries.sort_by(|left, right| left.path.cmp(&right.path));
+        cache
+            .entries
+            .sort_by(|left, right| left.path.cmp(&right.path));
 
         if let Err(error) = save_session_summary_cache(path, &cache) {
             log::warn!("failed to persist session summary cache: {error}");
@@ -790,21 +810,21 @@ mod tests {
     use super::{
         cached_summary_for_snapshot, enrich_session_summary, format_tray_status,
         get_codex_overview_from_sessions_dir, load_session_file_index, load_session_summary_cache,
-        modified_unix_ms, new_session_file_index, new_session_summary_cache,
+        modified_unix_ms, new_session_file_index, new_session_summary_cache, parse_session_file,
         recursive_session_tree_inventory, retained_cache_entries, save_session_file_index,
         save_session_summary_cache, session_file_index_from_inventory, session_file_index_is_valid,
         session_file_snapshots_from_index, CachedSessionSummary, CodexOverview,
-        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, StoredSessionSummary, UsageTotals,
-        SESSION_FILE_INDEX_VERSION, SESSION_SUMMARY_CACHE_VERSION,
+        CodexSessionSummary, RateLimitSnapshot, SessionFileSnapshot, StoredSessionSummary,
+        UsageTotals, SESSION_FILE_INDEX_VERSION, SESSION_SUMMARY_CACHE_VERSION,
     };
     use crate::settings;
+    use chrono::{Duration, SecondsFormat, Utc};
     use std::{
         collections::{HashMap, HashSet},
         env, fs,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
-    use chrono::{Duration, SecondsFormat, Utc};
 
     fn stored_session_with_rates(
         primary_used_percent: f64,
@@ -833,11 +853,14 @@ mod tests {
         }
     }
 
-    fn session_with_rates(primary_used_percent: f64, secondary_used_percent: f64) -> CodexSessionSummary {
-        enrich_session_summary(stored_session_with_rates(
-            primary_used_percent,
-            secondary_used_percent,
-        ), Utc::now())
+    fn session_with_rates(
+        primary_used_percent: f64,
+        secondary_used_percent: f64,
+    ) -> CodexSessionSummary {
+        enrich_session_summary(
+            stored_session_with_rates(primary_used_percent, secondary_used_percent),
+            Utc::now(),
+        )
     }
 
     fn overview_with_session(session: CodexSessionSummary) -> CodexOverview {
@@ -941,7 +964,10 @@ mod tests {
 
         let summary = cached_summary_for_snapshot(&entries, &snapshot(path, 100, 200));
 
-        assert_eq!(summary.and_then(|value| value.model), Some("gpt-5.4".to_string()));
+        assert_eq!(
+            summary.and_then(|value| value.model),
+            Some("gpt-5.4".to_string())
+        );
     }
 
     #[test]
@@ -987,7 +1013,9 @@ mod tests {
         fs::create_dir_all(&sessions_dir).expect("sessions dir should exist");
 
         let mut cache = new_session_summary_cache(&sessions_dir);
-        cache.entries.push(cache_entry("/tmp/session-1.jsonl", 100, 200));
+        cache
+            .entries
+            .push(cache_entry("/tmp/session-1.jsonl", 100, 200));
         save_session_summary_cache(&cache_path, &cache).expect("cache should save");
         let payload = fs::read_to_string(&cache_path).expect("cache should read");
 
@@ -1021,8 +1049,7 @@ mod tests {
     fn runtime_enrichment_marks_fifteen_minute_boundary_idle() {
         let now = Utc::now();
         let boundary = StoredSessionSummary {
-            updated_at: (now - Duration::minutes(15))
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            updated_at: (now - Duration::minutes(15)).to_rfc3339_opts(SecondsFormat::Millis, true),
             ..stored_session_with_rates(10.0, 20.0)
         };
 
@@ -1056,8 +1083,9 @@ mod tests {
         });
         save_session_summary_cache(&cache_path, &cache).expect("cache should save");
 
-        let overview = get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
-            .expect("overview should load from cache");
+        let overview =
+            get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
+                .expect("overview should load from cache");
 
         assert_eq!(overview.sessions.len(), 1);
         assert_eq!(overview.sessions[0].status, "idle");
@@ -1092,11 +1120,46 @@ mod tests {
         });
         save_session_summary_cache(&cache_path, &cache).expect("cache should save");
 
-        let overview = get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
-            .expect("overview should load from cache");
+        let overview =
+            get_codex_overview_from_sessions_dir(&sessions_dir, Some(&cache_path), None, 1)
+                .expect("overview should load from cache");
 
         assert_eq!(overview.sessions.len(), 1);
         assert_eq!(overview.sessions[0].status, "active");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn parser_prefers_general_codex_plan_limits_over_model_specific_limits() {
+        let temp_dir = unique_temp_dir("preferred-plan-limit");
+        let session_path = temp_dir.join("session.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"timestamp\":\"2026-05-02T10:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":100},\"last_token_usage\":{\"total_tokens\":10}},\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":39.0},\"secondary\":{\"used_percent\":20.0}}}}\n",
+                "{\"timestamp\":\"2026-05-02T10:00:01.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"total_tokens\":150},\"last_token_usage\":{\"total_tokens\":50}},\"rate_limits\":{\"limit_id\":\"codex_bengalfox\",\"limit_name\":\"GPT-5.3-Codex-Spark\",\"primary\":{\"used_percent\":0.0},\"secondary\":{\"used_percent\":0.0}}}}\n",
+            ),
+        )
+        .expect("session file should be written");
+
+        let summary = parse_session_file(&session_path).expect("session should parse");
+
+        assert_eq!(summary.total_usage.expect("total usage").total_tokens, 150);
+        assert_eq!(
+            summary
+                .primary_rate_limit
+                .expect("primary limit")
+                .used_percent,
+            39.0,
+        );
+        assert_eq!(
+            summary
+                .secondary_rate_limit
+                .expect("secondary limit")
+                .used_percent,
+            20.0,
+        );
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
@@ -1111,7 +1174,8 @@ mod tests {
         let index = session_file_index_from_inventory(&sessions_dir, inventory.clone());
         save_session_file_index(&index_path, &index).expect("index should save");
 
-        let loaded = load_session_file_index(&index_path, &sessions_dir).expect("index should load");
+        let loaded =
+            load_session_file_index(&index_path, &sessions_dir).expect("index should load");
 
         assert!(session_file_index_is_valid(&loaded, &sessions_dir));
         assert_eq!(loaded.version, SESSION_FILE_INDEX_VERSION);
@@ -1144,7 +1208,8 @@ mod tests {
 
         fs::write(&session_file, "changed").expect("session file should change");
 
-        let loaded = load_session_file_index(&index_path, &sessions_dir).expect("index should load");
+        let loaded =
+            load_session_file_index(&index_path, &sessions_dir).expect("index should load");
         assert!(!session_file_index_is_valid(&loaded, &sessions_dir));
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");

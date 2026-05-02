@@ -53,6 +53,11 @@ pnpm dev:desktop
 
 This starts the Vite frontend for Tauri and launches a native window. In desktop mode, the dashboard reads Codex overview data through a Tauri command instead of the Node API, so `apps/server` is only there to support the local development loop.
 The Tauri dev/build workflow injects `VITE_TOKENMETER_RUNTIME=desktop` so the shared frontend selects the desktop data path from the first render.
+The Tauri dev workflow prefers `http://localhost:5173`, then automatically selects another free local port when `5173` is already busy. To force a specific port:
+
+```bash
+TOKENMETER_DASHBOARD_DEV_PORT=5174 pnpm dev:desktop
+```
 
 The desktop app also creates a menu bar icon:
 
