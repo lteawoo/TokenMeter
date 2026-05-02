@@ -6,6 +6,10 @@ import tailwindcss from "@tailwindcss/vite"
 import { defineConfig } from 'vitest/config'
 
 const host = process.env.TAURI_DEV_HOST
+const devPort = Number.parseInt(
+  process.env.TOKENMETER_DASHBOARD_DEV_PORT ?? "5173",
+  10,
+)
 const tauriConfig = JSON.parse(
   fs.readFileSync(path.resolve(__dirname, "./src-tauri/tauri.conf.json"), "utf8"),
 ) as { version?: string }
@@ -30,7 +34,7 @@ export default defineConfig({
   },
   envPrefix: ['VITE_', 'TAURI_ENV_*'],
   server: {
-    port: 5173,
+    port: Number.isInteger(devPort) ? devPort : 5173,
     strictPort: true,
     host: host || false,
     hmr: host

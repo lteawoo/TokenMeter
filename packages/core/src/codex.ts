@@ -34,6 +34,7 @@ type ParsedSessionEvent = {
     type?: string;
     info?: TokenUsagePayload;
     rate_limits?: {
+      limit_id?: string;
       primary?: {
         used_percent?: number;
         window_minutes?: number;
@@ -59,6 +60,7 @@ const ZERO_USAGE: UsageTotals = {
   reasoningOutputTokens: 0,
   totalTokens: 0,
 };
+const PREFERRED_PLAN_LIMIT_ID = "codex";
 
 export const DEFAULT_CODEX_SESSIONS_DIR = path.join(
   os.homedir(),
@@ -104,6 +106,21 @@ function toRateLimitSnapshot(value?: {
   };
 }
 
+function shouldReplaceRateLimits(
+  currentLimitId: string | null,
+  nextLimitId: string | null,
+) {
+  if (nextLimitId === PREFERRED_PLAN_LIMIT_ID) {
+    return true;
+  }
+
+  if (currentLimitId === PREFERRED_PLAN_LIMIT_ID) {
+    return false;
+  }
+
+  return true;
+}
+
 function createEmptySessionSummary(filePath: string): CodexSessionSummary {
   const fileName = path.basename(filePath);
 
@@ -147,6 +164,7 @@ async function parseCodexSessionFile(
   filePath: string,
 ): Promise<CodexSessionSummary> {
   const summary = createEmptySessionSummary(filePath);
+  let selectedRateLimitId: string | null = null;
   const input = createReadStream(filePath, { encoding: "utf8" });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
 
@@ -174,11 +192,15 @@ async function parseCodexSessionFile(
       const info = event.payload.info;
       summary.totalUsage = toUsageTotals(info?.total_token_usage) ?? summary.totalUsage;
       summary.lastUsage = toUsageTotals(info?.last_token_usage) ?? summary.lastUsage;
-      summary.primaryRateLimit =
-        toRateLimitSnapshot(event.payload.rate_limits?.primary) ?? summary.primaryRateLimit;
-      summary.secondaryRateLimit =
-        toRateLimitSnapshot(event.payload.rate_limits?.secondary) ??
-        summary.secondaryRateLimit;
+      const nextRateLimitId = event.payload.rate_limits?.limit_id ?? null;
+      if (shouldReplaceRateLimits(selectedRateLimitId, nextRateLimitId)) {
+        selectedRateLimitId = nextRateLimitId;
+        summary.primaryRateLimit =
+          toRateLimitSnapshot(event.payload.rate_limits?.primary) ?? summary.primaryRateLimit;
+        summary.secondaryRateLimit =
+          toRateLimitSnapshot(event.payload.rate_limits?.secondary) ??
+          summary.secondaryRateLimit;
+      }
       summary.updatedAt = event.timestamp ?? summary.updatedAt;
     }
   }
