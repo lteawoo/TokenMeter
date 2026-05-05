@@ -6,6 +6,10 @@ apps/**/dist
 packages/**/dist
 __pycache__
 *.pyc
-.codex/
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/tokenmeter-release/
+!.codex/skills/tokenmeter-release/SKILL.md
 .serena/
 openspec/
