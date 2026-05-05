@@ -21,6 +21,7 @@ const MENU_OPEN_DASHBOARD: &str = "open-dashboard";
 const MENU_REFRESH_DASHBOARD: &str = "refresh-dashboard";
 const MENU_CHECK_FOR_UPDATES: &str = "check-for-updates";
 const MENU_QUIT_APP: &str = "quit-app";
+const TRAY_FALLBACK_TITLE: &str = "TM";
 const PANEL_WIDTH: f64 = 352.0;
 const PANEL_HEIGHT: f64 = 332.0;
 const PANEL_OFFSET_Y: f64 = 10.0;
@@ -243,15 +244,22 @@ fn start_tray_refresh_loop<R: Runtime + 'static>(app: AppHandle<R>) {
 pub(crate) fn sync_tray_status<R: Runtime>(
     app: &AppHandle<R>,
     status_text: Option<String>,
-    _tray_presentation_mode: settings::TrayPresentationMode,
+    tray_presentation_mode: settings::TrayPresentationMode,
 ) -> tauri::Result<()> {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return Ok(());
     };
 
-    tray.set_icon(None)?;
+    let title = tray_title(status_text.as_deref());
+    let show_icon = should_show_tray_icon(status_text.as_deref(), tray_presentation_mode);
 
-    tray.set_title(status_text.clone())?;
+    if show_icon {
+        tray.set_icon(app.default_window_icon().cloned())?;
+    } else {
+        tray.set_icon(None)?;
+    }
+
+    tray.set_title(Some(title))?;
     tray.set_tooltip(
         status_text
             .as_ref()
@@ -274,7 +282,9 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
     let tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
+        .title(TRAY_FALLBACK_TITLE)
         .tooltip("TokenMeter")
+        .icon_as_template(true)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().0.as_str() {
             MENU_OPEN_DASHBOARD => show_dashboard_window(app, false),
@@ -306,6 +316,24 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     refresh_tray_from_source(app)?;
 
     Ok(())
+}
+
+fn tray_title(status_text: Option<&str>) -> &str {
+    status_text
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(TRAY_FALLBACK_TITLE)
+}
+
+fn should_show_tray_icon(
+    status_text: Option<&str>,
+    tray_presentation_mode: settings::TrayPresentationMode,
+) -> bool {
+    matches!(
+        tray_presentation_mode,
+        settings::TrayPresentationMode::IconAndText
+    ) || status_text
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -370,8 +398,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        dashboard_visibility_for_event, effective_window_visibility, TRAY_REFRESH_INTERVAL_SECS,
+        dashboard_visibility_for_event, effective_window_visibility, should_show_tray_icon,
+        tray_title, TRAY_FALLBACK_TITLE, TRAY_REFRESH_INTERVAL_SECS,
     };
+    use crate::settings::TrayPresentationMode;
     use tauri::WindowEvent;
 
     #[test]
@@ -408,5 +438,27 @@ mod tests {
         assert!(effective_window_visibility(true, false));
         assert!(!effective_window_visibility(true, true));
         assert!(!effective_window_visibility(false, false));
+    }
+
+    #[test]
+    fn tray_title_falls_back_when_status_is_empty() {
+        assert_eq!(tray_title(None), TRAY_FALLBACK_TITLE);
+        assert_eq!(tray_title(Some("")), TRAY_FALLBACK_TITLE);
+        assert_eq!(tray_title(Some("  ")), TRAY_FALLBACK_TITLE);
+        assert_eq!(tray_title(Some("5h 12k")), "5h 12k");
+    }
+
+    #[test]
+    fn tray_icon_is_kept_when_status_text_would_be_invisible() {
+        assert!(should_show_tray_icon(None, TrayPresentationMode::TextOnly));
+        assert!(should_show_tray_icon(Some(""), TrayPresentationMode::TextOnly));
+        assert!(!should_show_tray_icon(
+            Some("7d 42k"),
+            TrayPresentationMode::TextOnly
+        ));
+        assert!(should_show_tray_icon(
+            Some("7d 42k"),
+            TrayPresentationMode::IconAndText
+        ));
     }
 }
