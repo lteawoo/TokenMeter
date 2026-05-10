@@ -259,7 +259,7 @@ describe("App workspace scope selection", () => {
   it("filters dashboard summaries, charts, and session ledger by selected workspace", async () => {
     render(<App />);
 
-    expect(screen.getByText("v0.1.6 · CHECK UPDATES")).toBeInTheDocument();
+    expect(screen.getByText(/v\d+\.\d+\.\d+ · CHECK UPDATES/)).toBeInTheDocument();
 
     const memeplateRadio = await screen.findByRole("radio", {
       name: /projects\/memeplate/i,
@@ -275,9 +275,21 @@ describe("App workspace scope selection", () => {
     expect(screen.getAllByText("3,500").length).toBeGreaterThan(0);
 
     const areaChart = screen.getByTestId("area-chart");
-    const barChart = screen.getByTestId("bar-chart");
     expect(areaChart.dataset.chart).toContain("\"dailyTokens\":3500");
     expect(areaChart.dataset.chart).not.toContain("\"dailyTokens\":900");
+
+    const usageTab = screen.getByRole("tab", { name: "Usage" });
+    fireEvent.mouseDown(usageTab);
+    fireEvent.click(usageTab);
+
+    await waitFor(() => {
+      expect(usageTab).toHaveAttribute("aria-selected", "true");
+    });
+
+    const usageAreaChart = screen.getByTestId("area-chart");
+    const barChart = screen.getByTestId("bar-chart");
+    expect(usageAreaChart.dataset.chart).toContain("\"totalTokens\":3500");
+    expect(usageAreaChart.dataset.chart).not.toContain("\"totalTokens\":900");
     expect(barChart.dataset.chart).toContain("projects/memeplate");
     expect(barChart.dataset.chart).not.toContain("my-skills");
 
