@@ -184,6 +184,16 @@ function getLastSevenDateKeys(todayKey: string) {
   });
 }
 
+function getDateWindowKeys(todayKey: string, dayCount: number) {
+  const today = new Date(`${todayKey}T00:00:00`);
+
+  return Array.from({ length: dayCount }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(today.getDate() - (dayCount - 1 - index));
+    return formatDateKey(date);
+  });
+}
+
 function formatShortDateKey(value: string) {
   const [, month, day] = value.split("-");
 
@@ -465,6 +475,14 @@ function SessionDetailRow({
   );
 }
 
+type UsagePeriod = "7d" | "30d" | "all";
+
+const USAGE_PERIOD_OPTIONS: Array<{ label: string; value: UsagePeriod }> = [
+  { label: "7D", value: "7d" },
+  { label: "30D", value: "30d" },
+  { label: "All", value: "all" },
+];
+
 const ZERO_USAGE_TOTALS: CodexOverview["totals"] = {
   inputTokens: 0,
   cachedInputTokens: 0,
@@ -472,6 +490,8 @@ const ZERO_USAGE_TOTALS: CodexOverview["totals"] = {
   reasoningOutputTokens: 0,
   totalTokens: 0,
 };
+const EMPTY_SESSIONS: CodexSessionSummary[] = [];
+const EMPTY_DAILY_USAGE: DailyUsageSummary[] = [];
 
 function addUsageTotals(
   left: CodexOverview["totals"],
@@ -495,6 +515,31 @@ function getDailyWorkspaceValue(record: DailyUsageSummary) {
   return record.cwd ?? record.filePath ?? "";
 }
 
+function getUsagePeriodStartDate(todayKey: string, period: UsagePeriod) {
+  if (period === "all") {
+    return null;
+  }
+
+  const dayCount = period === "30d" ? 30 : 7;
+  return getDateWindowKeys(todayKey, dayCount)[0] ?? todayKey;
+}
+
+function filterDailyUsageByPeriod(
+  records: DailyUsageSummary[],
+  todayKey: string,
+  period: UsagePeriod,
+) {
+  const startDate = getUsagePeriodStartDate(todayKey, period);
+
+  if (!startDate) {
+    return records;
+  }
+
+  return records.filter(
+    (record) => record.date >= startDate && record.date <= todayKey,
+  );
+}
+
 function aggregateDailyUsageByDate(
   records: DailyUsageSummary[],
   todayKey: string,
@@ -514,8 +559,73 @@ function aggregateDailyUsageByDate(
     dailyTokens: usageByDate.get(date)?.totalTokens ?? 0,
     totalTokens: usageByDate.get(date)?.totalTokens ?? 0,
     inputTokens: usageByDate.get(date)?.inputTokens ?? 0,
+    cachedInputTokens: usageByDate.get(date)?.cachedInputTokens ?? 0,
     outputTokens: usageByDate.get(date)?.outputTokens ?? 0,
+    reasoningOutputTokens: usageByDate.get(date)?.reasoningOutputTokens ?? 0,
   }));
+}
+
+function aggregateDailyUsageForPeriod(
+  records: DailyUsageSummary[],
+  todayKey: string,
+  period: UsagePeriod,
+) {
+  const usageByDate = new Map<string, CodexOverview["totals"]>();
+
+  records.forEach((record) => {
+    usageByDate.set(
+      record.date,
+      addUsageTotals(usageByDate.get(record.date) ?? ZERO_USAGE_TOTALS, record.usage),
+    );
+  });
+
+  const dateKeys =
+    period === "all"
+      ? Array.from(usageByDate.keys()).sort()
+      : getDateWindowKeys(todayKey, period === "30d" ? 30 : 7);
+
+  return dateKeys.map((date) => ({
+    date,
+    label: formatShortDateKey(date),
+    dailyTokens: usageByDate.get(date)?.totalTokens ?? 0,
+    totalTokens: usageByDate.get(date)?.totalTokens ?? 0,
+    inputTokens: usageByDate.get(date)?.inputTokens ?? 0,
+    cachedInputTokens: usageByDate.get(date)?.cachedInputTokens ?? 0,
+    outputTokens: usageByDate.get(date)?.outputTokens ?? 0,
+    reasoningOutputTokens: usageByDate.get(date)?.reasoningOutputTokens ?? 0,
+  }));
+}
+
+function aggregateWorkspaceUsage(records: DailyUsageSummary[]) {
+  const usageByWorkspace = new Map<
+    string,
+    { label: string; sessionCount: number; usage: CodexOverview["totals"] }
+  >();
+
+  records.forEach((record) => {
+    const workspaceValue = getDailyWorkspaceValue(record);
+    const key = workspaceValue || "unknown";
+    const existing = usageByWorkspace.get(key);
+
+    if (existing) {
+      usageByWorkspace.set(key, {
+        ...existing,
+        sessionCount: existing.sessionCount + record.sessionCount,
+        usage: addUsageTotals(existing.usage, record.usage),
+      });
+      return;
+    }
+
+    usageByWorkspace.set(key, {
+      label: workspaceValue ? getWorkspaceLabel(workspaceValue) : "Unknown",
+      sessionCount: record.sessionCount,
+      usage: addUsageTotals(ZERO_USAGE_TOTALS, record.usage),
+    });
+  });
+
+  return Array.from(usageByWorkspace.entries())
+    .map(([value, summary]) => ({ value, ...summary }))
+    .sort((left, right) => right.usage.totalTokens - left.usage.totalTokens);
 }
 
 function App() {
@@ -535,6 +645,7 @@ function App() {
   );
   const [copiedHomebrewCommand, setCopiedHomebrewCommand] = useState(false);
   const [selectedWorkspace, setSelectedWorkspace] = useState(ALL_WORKSPACES_VALUE);
+  const [usagePeriod, setUsagePeriod] = useState<UsagePeriod>("7d");
   const runtimeKind = getRuntimeKind();
   const desktopView = getDesktopView();
   const openSettingsFromQuery = shouldOpenSettingsFromQuery();
@@ -963,7 +1074,7 @@ function App() {
     }
   }, [appUpdateState.homebrewUpgradeCommand]);
 
-  const sessions = overview?.sessions ?? [];
+  const sessions = overview?.sessions ?? EMPTY_SESSIONS;
   const workspaceSummaries = useMemo(
     () => buildWorkspaceScopeSummaries(sessions),
     [sessions],
@@ -990,7 +1101,7 @@ function App() {
 
   const latest = filteredSessions[0] ?? null;
   const todayKey = getDateKeyFromIso(overview?.generatedAt);
-  const dailyUsageRecords = overview?.dailyUsage ?? [];
+  const dailyUsageRecords = overview?.dailyUsage ?? EMPTY_DAILY_USAGE;
   const filteredDailyUsageRecords = useMemo(() => {
     if (selectedWorkspace === ALL_WORKSPACES_VALUE) {
       return dailyUsageRecords;
@@ -1004,13 +1115,70 @@ function App() {
     () => aggregateDailyUsageByDate(filteredDailyUsageRecords, todayKey),
     [filteredDailyUsageRecords, todayKey],
   );
+  const usagePeriodRecords = useMemo(
+    () =>
+      filterDailyUsageByPeriod(
+        filteredDailyUsageRecords,
+        todayKey,
+        usagePeriod,
+      ),
+    [filteredDailyUsageRecords, todayKey, usagePeriod],
+  );
+  const usageChartData = useMemo(
+    () =>
+      aggregateDailyUsageForPeriod(
+        usagePeriodRecords,
+        todayKey,
+        usagePeriod,
+      ),
+    [todayKey, usagePeriod, usagePeriodRecords],
+  );
+  const usagePeriodTotals = useMemo(
+    () =>
+      usagePeriodRecords.reduce(
+        (acc, record) => addUsageTotals(acc, record.usage),
+        ZERO_USAGE_TOTALS,
+      ),
+    [usagePeriodRecords],
+  );
+  const usageActiveDays = useMemo(
+    () =>
+      new Set(
+        usagePeriodRecords
+          .filter((record) => record.usage.totalTokens > 0)
+          .map((record) => record.date),
+      ).size,
+    [usagePeriodRecords],
+  );
+  const usagePeriodAverage = Math.round(
+    usagePeriodTotals.totalTokens / Math.max(usageActiveDays, 1),
+  );
+  const usagePeakDay = usageChartData.reduce(
+    (peak, record) => (record.totalTokens > peak.totalTokens ? record : peak),
+    usageChartData[0] ?? {
+      date: todayKey,
+      label: formatShortDateKey(todayKey),
+      dailyTokens: 0,
+      totalTokens: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+    },
+  );
+  const workspaceUsageRanking = useMemo(
+    () => aggregateWorkspaceUsage(usagePeriodRecords),
+    [usagePeriodRecords],
+  );
   const todayDailyUsage = dailyChartData.at(-1) ?? {
     date: todayKey,
     label: formatShortDateKey(todayKey),
     dailyTokens: 0,
     totalTokens: 0,
     inputTokens: 0,
+    cachedInputTokens: 0,
     outputTokens: 0,
+    reasoningOutputTokens: 0,
   };
   const todayUsage = todayDailyUsage.totalTokens;
   const sevenDayTotal = dailyChartData.reduce(
@@ -1023,9 +1191,12 @@ function App() {
     dailyChartData[0] ?? {
       date: todayKey,
       label: formatShortDateKey(todayKey),
+      dailyTokens: 0,
       totalTokens: 0,
       inputTokens: 0,
+      cachedInputTokens: 0,
       outputTokens: 0,
+      reasoningOutputTokens: 0,
     },
   );
   const providerLabel = getProviderLabel(overview?.provider);
@@ -1034,14 +1205,6 @@ function App() {
   const primaryRemaining = getRemainingPercent(latest?.primaryRateLimit?.usedPercent);
   const secondaryRemaining = getRemainingPercent(
     latest?.secondaryRateLimit?.usedPercent,
-  );
-  const filteredTotals = useMemo(
-    () =>
-      filteredSessions.reduce(
-        (acc, session) => addUsageTotals(acc, session.totalUsage),
-        ZERO_USAGE_TOTALS,
-      ),
-    [filteredSessions],
   );
   const selectedWorkspaceSummary =
     selectedWorkspace === ALL_WORKSPACES_VALUE
@@ -1057,9 +1220,14 @@ function App() {
       ? `${workspaceSummaries.length} workspace${workspaceSummaries.length === 1 ? "" : "s"}`
       : `${selectedWorkspaceSummary.label} · ${selectedWorkspaceSummary.sessionCount} session${selectedWorkspaceSummary.sessionCount === 1 ? "" : "s"}`;
 
-  const chartData = useMemo(
+  const topSessionChartData = useMemo(
     () =>
-      filteredSessions
+      [...filteredSessions]
+        .sort(
+          (left, right) =>
+            (right.totalUsage?.totalTokens ?? 0) -
+            (left.totalUsage?.totalTokens ?? 0),
+        )
         .slice(0, 8)
         .reverse()
         .map((session) => ({
@@ -1092,6 +1260,22 @@ function App() {
     dailyTokens: {
       label: "Daily Tokens",
       color: "var(--chart-1)",
+    },
+    inputTokens: {
+      label: "Input",
+      color: "var(--chart-1)",
+    },
+    cachedInputTokens: {
+      label: "Cached Input",
+      color: "var(--chart-2)",
+    },
+    outputTokens: {
+      label: "Output",
+      color: "var(--chart-3)",
+    },
+    reasoningOutputTokens: {
+      label: "Reasoning Output",
+      color: "var(--chart-4)",
     },
   } satisfies ChartConfig;
 
@@ -1466,6 +1650,9 @@ function App() {
               <TabsTrigger value="overview" className="font-mono">
                 Overview
               </TabsTrigger>
+              <TabsTrigger value="usage" className="font-mono">
+                Usage
+              </TabsTrigger>
               <TabsTrigger value="sessions" className="font-mono">
                 Sessions
               </TabsTrigger>
@@ -1644,30 +1831,86 @@ function App() {
                   </CardContent>
                 </Card>
               </section>
+            </TabsContent>
 
-              <section className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
-                <Card className="border-border/70 bg-card/80 backdrop-blur">
-                  <CardHeader>
+            <TabsContent value="usage" className="space-y-4">
+              <Card className="border-border/70 bg-card/80 backdrop-blur">
+                <CardHeader className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                  <div>
                     <CardTitle className="font-mono text-xl">
-                      Recent session comparison
+                      Usage dashboard
                     </CardTitle>
                     <CardDescription>
-                      Horizontal scan of session totals for quick ranking.
+                      Token flow, workspace concentration, and heavy sessions.
                     </CardDescription>
+                  </div>
+                  <div className="flex w-fit rounded-2xl border border-border/70 bg-background/45 p-1">
+                    {USAGE_PERIOD_OPTIONS.map((option) => (
+                      <Button
+                        className="h-8 rounded-xl px-3 font-mono text-xs"
+                        key={option.value}
+                        onClick={() => {
+                          setUsagePeriod(option.value);
+                        }}
+                        type="button"
+                        variant={usagePeriod === option.value ? "secondary" : "ghost"}
+                      >
+                        {option.label}
+                      </Button>
+                    ))}
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <CompactStatTile
+                    label="Total tokens"
+                    value={formatCompactTokenNumber(usagePeriodTotals.totalTokens)}
+                  />
+                  <CompactStatTile
+                    label="Avg / active day"
+                    value={formatCompactTokenNumber(usagePeriodAverage)}
+                  />
+                  <CompactStatTile
+                    label="Peak day"
+                    value={formatCompactTokenNumber(usagePeakDay.totalTokens)}
+                  />
+                  <CompactStatTile
+                    label="Active days"
+                    value={formatNumber(usageActiveDays)}
+                  />
+                </CardContent>
+              </Card>
+
+              <section className="grid gap-4 xl:grid-cols-[1.55fr_1fr]">
+                <Card className="border-border/70 bg-card/80 backdrop-blur">
+                  <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+                    <div>
+                      <CardTitle className="font-mono text-xl">
+                        Token flow
+                      </CardTitle>
+                      <CardDescription>
+                        Input, cached input, output, and reasoning output by local date.
+                      </CardDescription>
+                    </div>
+                    <Badge
+                      variant="outline"
+                      className="border-border/80 bg-background/60 font-mono text-xs"
+                    >
+                      {USAGE_PERIOD_OPTIONS.find((option) => option.value === usagePeriod)?.label}
+                    </Badge>
                   </CardHeader>
                   <CardContent>
-                    {chartData.length ? (
+                    {usageChartData.length ? (
                       <ChartContainer
                         config={chartConfig}
-                        className="h-[280px] w-full"
+                        className="h-[340px] w-full"
                       >
-                        <BarChart data={chartData}>
+                        <AreaChart data={usageChartData}>
                           <CartesianGrid vertical={false} />
                           <YAxis
                             axisLine={false}
                             tickLine={false}
                             tickMargin={12}
-                            width={56}
+                            width={72}
                             tickFormatter={(value) =>
                               formatCompactTokenNumber(Number(value))
                             }
@@ -1679,19 +1922,49 @@ function App() {
                             tickLine={false}
                             tickMargin={12}
                           />
-                          <ChartTooltip
-                            content={<ChartTooltipContent indicator="dashed" />}
+                          <ChartTooltip content={<ChartTooltipContent indicator="line" />} />
+                          <ChartLegend content={<ChartLegendContent />} />
+                          <Area
+                            dataKey="inputTokens"
+                            fill="var(--color-inputTokens)"
+                            fillOpacity={0.28}
+                            stackId="tokens"
+                            stroke="var(--color-inputTokens)"
+                            strokeWidth={2}
+                            type="monotone"
                           />
-                          <Bar
-                            dataKey="lastTurnTokens"
-                            fill="var(--color-lastTurnTokens)"
-                            radius={8}
+                          <Area
+                            dataKey="cachedInputTokens"
+                            fill="var(--color-cachedInputTokens)"
+                            fillOpacity={0.24}
+                            stackId="tokens"
+                            stroke="var(--color-cachedInputTokens)"
+                            strokeWidth={2}
+                            type="monotone"
                           />
-                        </BarChart>
+                          <Area
+                            dataKey="outputTokens"
+                            fill="var(--color-outputTokens)"
+                            fillOpacity={0.3}
+                            stackId="tokens"
+                            stroke="var(--color-outputTokens)"
+                            strokeWidth={2}
+                            type="monotone"
+                          />
+                          <Area
+                            dataKey="reasoningOutputTokens"
+                            fill="var(--color-reasoningOutputTokens)"
+                            fillOpacity={0.34}
+                            stackId="tokens"
+                            stroke="var(--color-reasoningOutputTokens)"
+                            strokeWidth={2}
+                            type="monotone"
+                          />
+                        </AreaChart>
                       </ChartContainer>
                     ) : (
-                      <div className="flex h-[280px] items-center justify-center text-sm text-muted-foreground">
-                        No session comparison data available.
+                      <div className="flex h-[340px] items-center justify-center text-sm text-muted-foreground">
+                        No usage data available for this period.
                       </div>
                     )}
                   </CardContent>
@@ -1703,17 +1976,17 @@ function App() {
                       Token mix
                     </CardTitle>
                     <CardDescription>
-                      Core token composition across the tracked sessions.
+                      Composition across the selected usage period.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-3">
                     {[
-                      ["Input", filteredTotals.inputTokens],
-                      ["Cached input", filteredTotals.cachedInputTokens],
-                      ["Output", filteredTotals.outputTokens],
+                      ["Input", usagePeriodTotals.inputTokens],
+                      ["Cached input", usagePeriodTotals.cachedInputTokens],
+                      ["Output", usagePeriodTotals.outputTokens],
                       [
                         "Reasoning output",
-                        filteredTotals.reasoningOutputTokens,
+                        usagePeriodTotals.reasoningOutputTokens,
                       ],
                     ].map(([label, value]) => (
                       <div
@@ -1728,6 +2001,119 @@ function App() {
                         </span>
                       </div>
                     ))}
+                  </CardContent>
+                </Card>
+              </section>
+
+              <section className="grid gap-4 lg:grid-cols-[1fr_1.15fr]">
+                <Card className="border-border/70 bg-card/80 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle className="font-mono text-xl">
+                      Workspace usage
+                    </CardTitle>
+                    <CardDescription>
+                      Ranked token totals for the selected scope and period.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-3">
+                    {workspaceUsageRanking.length ? (
+                      workspaceUsageRanking.slice(0, 6).map((workspace) => {
+                        const share =
+                          usagePeriodTotals.totalTokens > 0
+                            ? Math.round(
+                                (workspace.usage.totalTokens /
+                                  usagePeriodTotals.totalTokens) *
+                                  100,
+                              )
+                            : 0;
+
+                        return (
+                          <div
+                            className="grid gap-2 rounded-2xl border border-border/70 bg-secondary/35 px-4 py-3"
+                            key={workspace.value}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate font-medium">
+                                  {workspace.label}
+                                </p>
+                                <p className="font-mono text-xs text-muted-foreground">
+                                  {formatNumber(workspace.sessionCount)} session
+                                  {workspace.sessionCount === 1 ? "" : "s"}
+                                </p>
+                              </div>
+                              <div className="text-right font-mono">
+                                <p className="font-semibold">
+                                  {formatCompactTokenNumber(workspace.usage.totalTokens)}
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  {share}%
+                                </p>
+                              </div>
+                            </div>
+                            <div className="h-1.5 overflow-hidden rounded-full bg-background/70">
+                              <div
+                                className="h-full rounded-full bg-accent"
+                                style={{ width: `${share}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-2xl border border-border/70 bg-secondary/35 px-4 py-8 text-center text-sm text-muted-foreground">
+                        No workspace usage found.
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="border-border/70 bg-card/80 backdrop-blur">
+                  <CardHeader>
+                    <CardTitle className="font-mono text-xl">
+                      Top sessions
+                    </CardTitle>
+                    <CardDescription>
+                      Largest session totals in the selected workspace scope.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {topSessionChartData.length ? (
+                      <ChartContainer
+                        config={chartConfig}
+                        className="h-[320px] w-full"
+                      >
+                        <BarChart data={topSessionChartData}>
+                          <CartesianGrid vertical={false} />
+                          <YAxis
+                            axisLine={false}
+                            tickLine={false}
+                            tickMargin={12}
+                            width={64}
+                            tickFormatter={(value) =>
+                              formatCompactTokenNumber(Number(value))
+                            }
+                          />
+                          <XAxis
+                            axisLine={false}
+                            dataKey="label"
+                            minTickGap={24}
+                            tickLine={false}
+                            tickMargin={12}
+                          />
+                          <ChartTooltip content={<ChartTooltipContent indicator="dashed" />} />
+                          <Bar
+                            dataKey="totalTokens"
+                            fill="var(--color-totalTokens)"
+                            radius={8}
+                          />
+                        </BarChart>
+                      </ChartContainer>
+                    ) : (
+                      <div className="flex h-[320px] items-center justify-center text-sm text-muted-foreground">
+                        No session comparison data available.
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               </section>
